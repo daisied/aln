@@ -2,14 +2,9 @@
 set -euo pipefail
 
 BINARY_NAME="${ALN_BINARY_NAME:-aln}"
-REPO="${ALN_REPO:-OWNER/REPO}"
+REPO="${ALN_REPO:-daisied/aln}"
 VERSION="${ALN_VERSION:-latest}"
 INSTALL_DIR="${ALN_INSTALL_DIR:-$HOME/.local/bin}"
-
-if [[ "$REPO" == "OWNER/REPO" ]]; then
-  echo "error: set ALN_REPO to your GitHub repo (example: ALN_REPO=acme/aln)." >&2
-  exit 1
-fi
 
 if ! command -v curl >/dev/null 2>&1; then
   echo "error: curl is required." >&2

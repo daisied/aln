@@ -1,153 +1,180 @@
 # ALN
 
 <p align="center">
-  <img src="https://placehold.co/1200x520?text=ALN+Editor+Hero+Screenshot" alt="ALN hero screenshot" />
+  <img src="https://raw.githubusercontent.com/daisied/aln/main/docs/images/hero.png" alt="ALN hero" />
 </p>
 
 <p align="center">
-  A fast terminal-native editor with modern workflows: LSP, fuzzy navigation, integrated terminal, multi-cursor editing, and safe recovery/session restore.
+  A terminal-first code editor that feels lightweight, modern, and dependable.
+</p>
+
+<p align="center">
+  <a href="https://github.com/daisied/aln/releases">Releases</a> ·
+  <a href="#quick-setup">Quick Setup</a> ·
+  <a href="#keybindings">Keybindings</a>
 </p>
 
 ---
 
 ## Quick setup
 
-> Replace `<owner>/<repo>` with your GitHub repository path.
-
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh | ALN_REPO=<owner>/<repo> bash
+curl -fsSL https://raw.githubusercontent.com/daisied/aln/main/scripts/install.sh | bash
 ```
 
-This installs `aln` to `~/.local/bin` and configures your shell PATH if needed.
+That installs `aln` into `~/.local/bin` and helps add it to your PATH.
 
 ---
 
 ## Why ALN
 
-ALN is a strong alternative when you want:
-- **Nano simplicity** with significantly more power.
-- **Vim-speed terminal workflow** without modal complexity.
-- **VS Code-style conveniences** (quick open, command palette, search, tabs, preview tabs, LSP) directly in the terminal.
+If you like editing in the terminal but still want modern tooling, ALN sits in a nice middle ground:
 
-It is designed for developers who spend serious time in terminal sessions, SSH, tmux, or remote environments and still want modern editing features.
+- **Faster and richer than basic terminal editors**
+- **Less ceremony than modal workflows**
+- **More focused than heavyweight GUI IDEs**
+
+It is built for people living in shells, SSH sessions, tmux, and remote boxes.
 
 ---
 
 ## Screenshots
 
 <p align="center">
-  <img src="https://placehold.co/1200x700?text=Editor+View+(Tree+Tabs+Status)" alt="Editor view screenshot" />
+  <img src="https://raw.githubusercontent.com/daisied/aln/main/docs/images/editor-main.png" alt="Editor: tree, tabs, status" />
 </p>
 
 <p align="center">
-  <img src="https://placehold.co/1200x700?text=Command+Palette+%2B+Project+Search" alt="Command palette screenshot" />
+  <img src="https://raw.githubusercontent.com/daisied/aln/main/docs/images/command-palette.png" alt="Command palette and project search" />
 </p>
 
 <p align="center">
-  <img src="https://placehold.co/1200x700?text=Integrated+Terminal+%2B+Scrollback" alt="Terminal screenshot" />
+  <img src="https://raw.githubusercontent.com/daisied/aln/main/docs/images/terminal.png" alt="Integrated terminal" />
 </p>
 
 ---
 
-## Feature highlights
+## Features
 
 ### Editing
-- Multi-tab editing with preview tabs (single-click opens preview, edits pin tab)
-- Undo/redo with operation stack
-- Multi-cursor editing:
-  - Add next occurrence (`Ctrl+D`)
-  - Vertical multi-cursor via middle/right drag
-- Auto-close pairs for brackets/quotes with smart swallow behavior
-- Wrap selected text with quotes (`'`, `"`, `` ` ``)
-- Smart newline indentation and indentation detection
-- Indent/dedent selection, move line up/down, duplicate line
-- Toggle line comments based on detected language
-- Code folding based on indentation (`Ctrl+.`)
-- Word movement/deletion (`Ctrl/Alt+Arrow`, `Ctrl+Backspace`, `Ctrl+Delete`)
-- Binary-file safety (opens read-only) and large-file warnings
-- Line ending + encoding detection/preservation
+- Tabs + preview tabs
+- Undo/redo
+- Multi-cursor editing (`Ctrl+D`, vertical mouse multi-cursor)
+- Auto-close pairs + quote wrapping
+- Smart indentation on newline
+- Duplicate/move lines, indent/dedent, comment toggle
+- Word movement and word deletion
+- Code folding by indentation
+- Binary-file safe mode + large-file warnings
+- Preserves encoding and line endings
 
 ### Navigation & search
 - Quick Open (`Ctrl+P`) with fuzzy ranking
 - Command Palette (`Ctrl+Shift+P` / `Ctrl+Space`)
-- Project-wide search from palette with `%query` (ripgrep + grep fallback)
-- Find (`Ctrl+F`) and Find/Replace (`Ctrl+R`) with regex support
+- Project search inside palette with `%query`
+- Find + find/replace (+ regex)
 - Match navigation (`F3`, `Shift+F3`)
 - Go to line (`Ctrl+G`)
-- Bracket matching jump (`Ctrl+]`)
-- Per-tab view state persistence (scroll/cursor)
+- Jump to matching bracket (`Ctrl+]`)
 
-### IDE-like capabilities
-- LSP integration for:
-  - Completion popup
-  - Diagnostics (errors/warnings in status)
-  - Go to definition (`F12`)
-  - Rename symbol (`F2`)
-- Language-aware defaults for tab size and tabs/spaces
+### IDE features
+- LSP completion popup
+- Diagnostics (errors/warnings)
+- Go to definition (`F12`)
+- Rename symbol (`F2`)
+- Syntax highlighting (Chroma)
 - `.editorconfig` support
-- Syntax highlighting via Chroma
 
-### UI & workflow
-- Integrated file tree with:
-  - Expand/collapse
-  - New file/dir, rename, delete
-  - Selection sync with active file
-- Integrated terminal with PTY:
-  - ANSI/CSI/OSC support
-  - Alternate screen support (vim/htop)
-  - Mouse selection + copy
-  - Scrollback view
-  - Resize + reflow behavior
-- Configurable themes and settings dialog (`Alt+,`)
-- Mouse support across editor, tabs, tree, and terminal
+### UI & terminal
+- File tree (open, create, rename, delete, refresh)
+- PTY terminal with ANSI support
+- Terminal scrollback + selection copy
+- Alternate screen support (vim/htop/etc.)
+- Mouse support throughout editor
+- Theme + behavior settings dialog (`Alt+,`)
 
-### Reliability features
-- File watcher with external-change reload handling
-- Autosave crash backups (`~/.local/share/aln/backups`)
-- Session restore per working directory (`~/.local/share/aln/sessions`)
-- Clean shutdown of terminal and language servers
+### Reliability
+- External file change watching + reload flow
+- Autosave crash recovery backups
+- Session restore per working directory
+- Clean shutdown of terminal + language servers
+
+<details>
+<summary><strong>Complete feature list (full detail)</strong></summary>
+
+#### Editing depth
+- Auto-close bracket/quote insertion and smart swallow behavior
+- Selection wrapping with `'`, `"`, and `` ` ``
+- Per-language indentation defaults (tabs/spaces + tab width)
+- Multi-cursor insert/delete/movement across lines
+- Selection-based copy/cut + line fallback behavior
+- Fold discovery from indentation blocks
+
+#### Search depth
+- Fuzzy scored ranking in quick open + command palette
+- Palette `%query` search uses `rg`; falls back to `grep`
+- Incremental find state with next/prev navigation callbacks
+
+#### LSP depth
+- Auto-start known servers when available in PATH
+- Diagnostics mapped per file URI
+- Workspace rename edits applied across files
+- Hover and completion protocol plumbing
+
+#### Terminal depth
+- ANSI/CSI/OSC parser
+- Scrollback rendering + view offsets
+- Alternate buffer support and cursor mode handling
+- Bracketed paste support
+
+#### Persistence depth
+- Backups stored at `~/.local/share/aln/backups`
+- Sessions stored at `~/.local/share/aln/sessions`
+- Config stored at `~/.config/aln/settings.json`
+
+</details>
 
 ---
 
 ## Installation
 
-### Option 1: One-command installer (recommended)
+### 1) One-line installer (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh | ALN_REPO=<owner>/<repo> bash
+curl -fsSL https://raw.githubusercontent.com/daisied/aln/main/scripts/install.sh | bash
 ```
 
-Optional environment variables:
-- `ALN_REPO` (required if script default is not updated)
-- `ALN_VERSION` (example: `v1.2.3`, default: latest)
+Optional installer variables:
+- `ALN_REPO` (default: `daisied/aln`)
+- `ALN_VERSION` (default: latest)
 - `ALN_INSTALL_DIR` (default: `~/.local/bin`)
 - `ALN_BINARY_NAME` (default: `aln`)
 
-### Option 2: Build from source
+### 2) Build from source
 
 ```bash
-git clone https://github.com/<owner>/<repo>.git
-cd <repo>
+git clone https://github.com/daisied/aln.git
+cd aln
 make build
 make install
 ```
 
-### Option 3: Manual release install
+### 3) Manual release install
 
-1. Download the release asset for your OS/arch.
-2. Make it executable: `chmod +x aln`
-3. Move it to `~/.local/bin/aln`
-4. Ensure `~/.local/bin` is on your `PATH`.
+1. Download the release binary for your OS/arch
+2. `chmod +x aln`
+3. Move to `~/.local/bin/aln`
+4. Ensure `~/.local/bin` is in your PATH
 
 ---
 
 ## Usage
 
 ```bash
-aln                # Open in current directory
-aln .              # Open in current directory
-aln path/to/file   # Open specific file
-aln path/to/dir    # Start in directory
+aln
+aln .
+aln path/to/file
+aln path/to/directory
 ```
 
 ---
@@ -160,33 +187,32 @@ aln path/to/dir    # Start in directory
 - `Ctrl+H` / `F1` help
 - `Alt+,` settings
 
-### Files / tabs
+### Files/tabs
 - `Ctrl+N` new file
 - `Ctrl+W` close tab
 - `Ctrl+Tab` / `Ctrl+Shift+Tab` next/prev tab
-- `Alt+1..9`, `Alt+0` jump to tab
+- `Alt+1..9`, `Alt+0` jump to tab number
 
 ### Editing
 - `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo
-- `Ctrl+C`, `Ctrl+X`, `Ctrl+V` copy/cut/paste
+- `Ctrl+C` / `Ctrl+X` / `Ctrl+V` copy/cut/paste
 - `Ctrl+A` select all
-- `Ctrl+D` add next occurrence (multi-cursor)
+- `Ctrl+D` select next occurrence (multi-cursor)
 - `Ctrl+/` toggle comment
 - `Alt+Up/Down` move line
 - `Tab` / `Shift+Tab` indent/dedent
 - `Ctrl+Backspace` / `Ctrl+Delete` delete word
 
-### Navigation
+### Navigation/search
 - `Ctrl+F` find
 - `Ctrl+R` find/replace
 - `F3` / `Shift+F3` next/prev match
 - `Ctrl+G` go to line
-- `Ctrl+]` matching bracket
-- `Ctrl/Alt+Left/Right` word movement
+- `Ctrl+]` jump to bracket pair
 
 ### Panels
 - `Ctrl+B` toggle file tree
-- `Ctrl+E` focus tree/editor
+- `Ctrl+E` tree/editor focus
 - `Ctrl+T` toggle terminal
 - `Ctrl+Shift+P` or `Ctrl+Space` command palette
 - `Ctrl+.` toggle fold
@@ -198,29 +224,27 @@ aln path/to/dir    # Start in directory
 
 Settings file: `~/.config/aln/settings.json`
 
-Configurable options:
-- Theme (`dark`, `light`, `monokai`, `nord`, `solarized-dark`, `gruvbox`, `gruvbox-light`, `dracula`, `one-dark`, `tokyo-night`, `catppuccin`)
-- Space size (`2`, `4`, `8`)
-- Tree width (`20`, `24`, `30`, `40`)
-- Terminal ratio (`0.20`, `0.30`, `0.40`, `0.50`)
-- Word wrap toggle
-- Auto-close toggle
-- Quote wrap selection toggle
-- Trim trailing whitespace on save
-- Insert final newline on save
+Configurable:
+- Theme
+- Space size
+- Tree width
+- Terminal ratio
+- Word wrap
+- Auto-close
+- Quote-wrap selection
+- Trim trailing whitespace
+- Insert final newline
 
 ---
 
-## LSP server prerequisites (optional, for IDE features)
+## LSP prerequisites (optional)
 
-Install any language servers you use:
+Install any you want to use:
 - Go: `gopls`
 - Python: `pyright-langserver`
 - TypeScript/JavaScript: `typescript-language-server`
 - Rust: `rust-analyzer`
 - C/C++: `clangd`
-
-ALN starts available servers automatically.
 
 ---
 
@@ -232,4 +256,3 @@ make install
 make clean
 go test ./...
 ```
-
