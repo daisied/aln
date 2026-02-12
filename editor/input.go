@@ -1004,12 +1004,14 @@ func (e *Editor) openFindDialog() {
 			d.NextMatch()
 			m := d.Matches[d.MatchIndex]
 			if buf != nil {
+				e.mouseScrolling = false
 				buf.Cursor = buffer.Cursor{Line: m.Line, Col: m.Col}
 			}
 		}
 	}
 	d.OnNavigate = func(line, col int) {
 		if buf != nil {
+			e.mouseScrolling = false
 			buf.Cursor = buffer.Cursor{Line: line, Col: col}
 		}
 	}
@@ -1028,12 +1030,14 @@ func (e *Editor) openFindReplaceDialog() {
 			d.NextMatch()
 			m := d.Matches[d.MatchIndex]
 			if buf != nil {
+				e.mouseScrolling = false
 				buf.Cursor = buffer.Cursor{Line: m.Line, Col: m.Col}
 			}
 		}
 	}
 	d.OnNavigate = func(line, col int) {
 		if buf != nil {
+			e.mouseScrolling = false
 			buf.Cursor = buffer.Cursor{Line: line, Col: col}
 		}
 	}

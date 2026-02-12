@@ -1,4 +1,4 @@
-module github.com/daisied/aln
+module editor
 
 go 1.25.7
 
