@@ -1,11 +1,9 @@
-# ALN
-
 <p align="center">
   <img src="docs/images/hero.png" alt="ALN hero" width="350"/>
 </p>
 
 <p align="center">
-  A terminal-first code editor that feels lightweight, modern, and dependable.
+  A modern code editor built natively for the terminal.
 </p>
 
 <p align="center">
