@@ -122,11 +122,11 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
   else
     RC_FILE="$HOME/.bashrc"
   fi
+  NEXT_STEP_CMD="source $RC_FILE"
 
   if [[ ! -f "$RC_FILE" ]] || ! grep -Fq "$PATH_EXPORT" "$RC_FILE"; then
     printf '\n%s\n' "$PATH_EXPORT" >> "$RC_FILE"
     echo "Added $INSTALL_DIR to PATH in $RC_FILE"
-    NEXT_STEP_CMD="source $RC_FILE"
   fi
 fi
 
