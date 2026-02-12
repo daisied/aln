@@ -1,7 +1,7 @@
 # ALN
 
 <p align="center">
-  <img src="docs/images/hero.png" alt="ALN hero" />
+  <img src="docs/images/hero.png" alt="ALN hero" width="350"/>
 </p>
 
 <p align="center">
