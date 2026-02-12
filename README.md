@@ -7,9 +7,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/daisied/aln/releases">Releases</a> ·
-  <a href="#quick-setup">Quick Setup</a> ·
-  <a href="#keybindings">Keybindings</a>
+  <a href="https://github.com/daisied/aln/releases"><img src="https://img.shields.io/github/v/release/daisied/aln?color=blue&label=latest" alt="Latest Release"></a>
+  <a href="https://github.com/daisied/aln/blob/main/LICENSE"><img src="https://img.shields.io/github/license/daisied/aln?color=green" alt="License"></a>
+</p>
+
+<p align="center">
+  <b><a href="#quick-setup">Quick Setup</a></b> •
+  <b><a href="#features">Features</a></b> •
+  <b><a href="#keybindings">Keybindings</a></b>
 </p>
 
 ---
