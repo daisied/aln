@@ -8,8 +8,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"editor/clipboardx"
 	"editor/config"
-	"github.com/atotto/clipboard"
 	"github.com/creack/pty"
 	"github.com/gdamore/tcell/v2"
 )
@@ -29,8 +29,6 @@ type scrollbackLine struct {
 	cells   []Cell
 	wrapped bool // true if this line was soft-wrapped (not a hard newline)
 }
-
-var terminalClipboard string
 
 type ansiState int
 
@@ -1246,6 +1244,19 @@ func (t *Terminal) HandleKey(ev *tcell.EventKey) bool {
 		return false
 	}
 
+	if ev.Key() == tcell.KeyInsert && ev.Modifiers()&tcell.ModShift != 0 {
+		if text := clipboardx.Read(); text != "" {
+			t.WritePaste(text)
+		}
+		return true
+	}
+	if ev.Key() == tcell.KeyRune && ev.Modifiers()&tcell.ModCtrl != 0 && ev.Modifiers()&tcell.ModShift != 0 && (ev.Rune() == 'v' || ev.Rune() == 'V') {
+		if text := clipboardx.Read(); text != "" {
+			t.WritePaste(text)
+		}
+		return true
+	}
+
 	// Shift+PgUp/PgDn for scrollback navigation
 	if ev.Modifiers()&tcell.ModShift != 0 {
 		switch ev.Key() {
@@ -1509,8 +1520,7 @@ func (t *Terminal) CopySelection() bool {
 	if text == "" {
 		return false
 	}
-	terminalClipboard = text
-	clipboard.WriteAll(text)
+	clipboardx.Write(text)
 	return true
 }
 

@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"editor/buffer"
+	"editor/clipboardx"
 	"editor/highlight"
 	"editor/ui"
 
-	"github.com/atotto/clipboard"
 	"github.com/gdamore/tcell/v2"
 )
 
@@ -869,20 +869,12 @@ func (e *Editor) clampCol(buf *buffer.Buffer) {
 	}
 }
 
-// Internal clipboard for when system clipboard is unavailable
-var internalClipboard string
-
 func clipboardWrite(text string) {
-	internalClipboard = text
-	clipboard.WriteAll(text) // best-effort system clipboard
+	clipboardx.Write(text)
 }
 
 func clipboardRead() string {
-	text, err := clipboard.ReadAll()
-	if err == nil && text != "" {
-		return text
-	}
-	return internalClipboard
+	return clipboardx.Read()
 }
 
 // Clipboard operations

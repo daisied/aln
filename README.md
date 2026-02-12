@@ -91,7 +91,7 @@ It is built for people living in shells, SSH sessions, tmux, and remote boxes.
 ### UI & terminal
 - File tree (open, create, rename, delete, refresh)
 - PTY terminal with ANSI support
-- Terminal scrollback + selection copy
+- Terminal scrollback + selection copy to system clipboard
 - Alternate screen support (vim/htop/etc.)
 - Mouse support throughout editor
 - Theme + behavior settings dialog (`Alt+,`)
@@ -129,6 +129,7 @@ It is built for people living in shells, SSH sessions, tmux, and remote boxes.
 - Scrollback rendering + view offsets
 - Alternate buffer support and cursor mode handling
 - Bracketed paste support
+- Clipboard sync with layered fallbacks (native API, wl-clipboard/xclip/xsel/pbcopy, OSC 52)
 
 #### Persistence depth
 - Backups stored at `~/.local/share/aln/backups`
@@ -217,6 +218,7 @@ aln path/to/directory
 - `Ctrl+B` toggle file tree
 - `Ctrl+E` tree/editor focus
 - `Ctrl+T` toggle terminal
+- `Ctrl+Shift+V` or `Shift+Insert` paste from system clipboard into terminal
 - `Ctrl+Shift+P` or `Ctrl+Space` command palette
 - `Ctrl+.` toggle fold
 - `Alt+Z` toggle word wrap
