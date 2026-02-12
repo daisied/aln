@@ -1,7 +1,7 @@
 # ALN
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/daisied/aln/main/docs/images/hero.png" alt="ALN hero" />
+  <img src="docs/images/hero.png" alt="ALN hero" />
 </p>
 
 <p align="center">
@@ -41,15 +41,15 @@ It is built for people living in shells, SSH sessions, tmux, and remote boxes.
 ## Screenshots
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/daisied/aln/main/docs/images/editor-main.png" alt="Editor: tree, tabs, status" />
+  <img src="docs/images/editor-main.png" alt="Editor: tree, tabs, status" />
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/daisied/aln/main/docs/images/command-palette.png" alt="Command palette and project search" />
+  <img src="docs/images/command-palette.png" alt="Command palette and project search" />
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/daisied/aln/main/docs/images/terminal.png" alt="Integrated terminal" />
+  <img src="docs/images/terminal.png" alt="Integrated terminal" />
 </p>
 
 ---
