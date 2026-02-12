@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/daisied/aln/releases"><img src="https://img.shields.io/github/v/release/daisied/aln?color=blue&label=latest" alt="Latest Release"></a>
-  <a href="https://github.com/daisied/aln/blob/main/LICENSE"><img src="https://img.shields.io/github/license/daisied/aln?color=green" alt="License"></a>
+  <a href="https://github.com/daisied/aln/blob/main/LICENSE"><img src="https://img.shields.io/github/license/daisied/aln?color=green&fresh=true" alt="License"></a>
 </p>
 
 <p align="center">
