@@ -110,6 +110,7 @@ install -m 0755 "$BIN_PATH" "$INSTALL_DIR/$BINARY_NAME"
 echo "Installed: $INSTALL_DIR/$BINARY_NAME"
 
 PATH_EXPORT="export PATH=\"$INSTALL_DIR:\$PATH\""
+NEXT_STEP_CMD=""
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
   RC_FILE=""
   if [[ -n "${ZSH_VERSION:-}" ]]; then
@@ -125,8 +126,14 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
   if [[ ! -f "$RC_FILE" ]] || ! grep -Fq "$PATH_EXPORT" "$RC_FILE"; then
     printf '\n%s\n' "$PATH_EXPORT" >> "$RC_FILE"
     echo "Added $INSTALL_DIR to PATH in $RC_FILE"
-    echo "Run: source $RC_FILE"
+    NEXT_STEP_CMD="source $RC_FILE"
   fi
 fi
 
 echo "$BINARY_NAME $TAG installed successfully."
+if [[ -n "$NEXT_STEP_CMD" ]]; then
+  echo
+  echo "Next step (run this in your shell):"
+  echo "  $NEXT_STEP_CMD"
+  echo
+fi
