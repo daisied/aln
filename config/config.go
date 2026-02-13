@@ -19,6 +19,8 @@ type Config struct {
 	QuoteWrapSelection bool    `json:"quote_wrap_selection"`
 	TrimTrailingSpace  bool    `json:"trim_trailing_whitespace"`
 	InsertFinalNewline bool    `json:"insert_final_newline"`
+	ImageTempTabs      bool    `json:"image_temp_tabs"`
+	ImageProtocol      string  `json:"image_protocol"`
 }
 
 // LanguageTabSize returns the appropriate tab size for a given language.
@@ -378,6 +380,8 @@ func Default() *Config {
 		QuoteWrapSelection: true,
 		TrimTrailingSpace:  false,
 		InsertFinalNewline: true,
+		ImageTempTabs:      true,
+		ImageProtocol:      "auto",
 	}
 }
 

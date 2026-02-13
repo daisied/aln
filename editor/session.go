@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"editor/buffer"
 )
 
 type SessionData struct {
@@ -40,6 +42,7 @@ func (e *Editor) SaveSession() {
 	if err != nil {
 		return
 	}
+	path := sessionPath(wd)
 
 	session := SessionData{
 		WorkingDir: wd,
@@ -64,6 +67,8 @@ func (e *Editor) SaveSession() {
 	}
 
 	if len(session.Files) == 0 {
+		// No open file-backed tabs: clear any stale session so closed tabs don't return.
+		_ = os.Remove(path)
 		return
 	}
 
@@ -75,7 +80,7 @@ func (e *Editor) SaveSession() {
 		return
 	}
 
-	os.WriteFile(sessionPath(wd), data, 0644)
+	os.WriteFile(path, data, 0644)
 }
 
 func (e *Editor) RestoreSession() bool {
@@ -109,7 +114,7 @@ func (e *Editor) RestoreSession() bool {
 		if buf != nil && buf.Path == fs.Path {
 			if fs.Line < len(buf.Lines) {
 				buf.Cursor.Line = fs.Line
-				lineLen := len(buf.Lines[fs.Line])
+				lineLen := buffer.RuneLen(buf.Lines[fs.Line])
 				if fs.Col <= lineLen {
 					buf.Cursor.Col = fs.Col
 				}

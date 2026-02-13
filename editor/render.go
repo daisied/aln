@@ -11,25 +11,26 @@ import (
 	"editor/ui"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/mattn/go-runewidth"
 )
 
-// bufferColToDisplayCol converts a buffer column (byte position) to display column (with tabs expanded)
+// bufferColToDisplayCol converts a buffer column (rune index) to display column (with tabs expanded and wide chars)
 func bufferColToDisplayCol(line string, bufCol int, tabSize int) int {
 	displayCol := 0
-	for i, r := range line {
+	for i, r := range []rune(line) {
 		if i >= bufCol {
 			break
 		}
 		if r == '\t' {
 			displayCol += tabSize - (displayCol % tabSize)
 		} else {
-			displayCol++
+			displayCol += runewidth.RuneWidth(r)
 		}
 	}
 	return displayCol
 }
 
-// displayColToBufferCol converts a display column (visual position) to buffer column (byte position)
+// displayColToBufferCol converts a display column (visual position) to buffer column (rune index)
 func displayColToBufferCol(line string, targetDisplayCol int, tabSize int) int {
 	if targetDisplayCol <= 0 {
 		return 0
@@ -40,7 +41,6 @@ func displayColToBufferCol(line string, targetDisplayCol int, tabSize int) int {
 	lineRunes := []rune(line)
 
 	for i, r := range lineRunes {
-		// Check if we've reached the target
 		if displayCol >= targetDisplayCol {
 			return bufCol
 		}
@@ -48,13 +48,11 @@ func displayColToBufferCol(line string, targetDisplayCol int, tabSize int) int {
 		if r == '\t' {
 			displayCol += tabSize - (displayCol % tabSize)
 		} else {
-			displayCol++
+			displayCol += runewidth.RuneWidth(r)
 		}
 
 		// If this character spans the target position, return its buffer position
 		if displayCol > targetDisplayCol {
-			// We're in the middle of this character (likely a tab)
-			// Return this character's buffer position
 			return i
 		}
 
@@ -66,11 +64,18 @@ func displayColToBufferCol(line string, targetDisplayCol int, tabSize int) int {
 }
 
 func (e *Editor) render() {
+	// Get theme first so we can set the screen style
+	theme := e.cfg.GetTheme()
+
+	// Set screen default style to use theme background, then clear
+	// This ensures the background is properly colored when clearing
+	defaultStyle := tcell.StyleDefault.Background(theme.Background).Foreground(theme.Foreground)
+	e.screen.SetStyle(defaultStyle)
 	e.screen.Clear()
+
 	screenW, screenH := e.screen.Size()
 
 	// Update themes in components
-	theme := e.cfg.GetTheme()
 	e.statusBar.Theme = theme
 	e.tabBar.Theme = theme
 	if e.fileTree != nil {
@@ -89,9 +94,19 @@ func (e *Editor) render() {
 	left := e.treeLeft()
 	e.tabBar.Render(e.screen, left, 0, screenW-left, 1)
 
-	// Editor area
+	// Editor area or image viewer
 	ex, ey, ew, eh := e.editorLayout()
-	e.renderEditor(ex, ey, ew, eh)
+	buf := e.activeBuffer()
+	if buf != nil {
+		if iv, ok := e.imageViews[buf]; ok && iv != nil {
+			iv.SetTheme(theme)
+			iv.Render(e.screen, ex, ey, ew, eh)
+		} else {
+			e.renderEditor(ex, ey, ew, eh)
+		}
+	} else {
+		e.renderEditor(ex, ey, ew, eh)
+	}
 
 	// Terminal
 	if e.termOpen && e.terminal != nil {
@@ -155,8 +170,8 @@ func (e *Editor) render() {
 	}
 
 	// Show cursor in editor when focused (with blinking)
-	if e.focusTarget == "editor" && e.dialog == nil && e.quickOpen == nil && e.commandPalette == nil {
-		buf := e.activeBuffer()
+	_, isImageView := e.imageViews[buf]
+	if e.focusTarget == "editor" && e.dialog == nil && e.quickOpen == nil && e.commandPalette == nil && !isImageView {
 		view := e.activeView()
 		cursorShown := false
 		if buf != nil && view != nil && e.cursorVisible {
@@ -187,7 +202,7 @@ func (e *Editor) render() {
 						cursorShown = true
 					}
 				}
-			} else {
+			} else if buf.Cursor.Line >= 0 && buf.Cursor.Line < len(buf.Lines) {
 				// Convert buffer column to display column for tabs
 				cursorDisplayCol := bufferColToDisplayCol(buf.Lines[buf.Cursor.Line], buf.Cursor.Col, buf.TabSize)
 				cursorScreenX := ex + gutterW + cursorDisplayCol - view.scrollX
@@ -214,7 +229,44 @@ func (e *Editor) render() {
 		e.screen.HideCursor()
 	}
 
-	e.screen.Show()
+	overlayVisible := e.dialog != nil || e.quickOpen != nil || e.commandPalette != nil || (e.autocomplete != nil && e.autocomplete.Visible)
+	var protocolIV *ui.ImageView
+	if buf != nil {
+		if iv, ok := e.imageViews[buf]; ok && iv != nil && iv.NeedsProtocolRender() {
+			protocolIV = iv
+		}
+	}
+	if overlayVisible && protocolIV != nil && !e.protocolImageHidden {
+		// Clear protocol image before Show/Sync so overlay text is drawn after it.
+		protocolIV.ClearProtocolImage()
+		e.protocolImageHidden = true
+	}
+
+	if e.needsSync {
+		e.screen.Sync()
+		e.needsSync = false
+		// After Sync(), the sixel graphics plane is overwritten by text cells.
+		// Mark the image as needing re-render to TTY.
+		if protocolIV != nil {
+			protocolIV.MarkDirty()
+		}
+	} else {
+		e.screen.Show()
+	}
+
+	// Render protocol-based images after Show() since they write raw escape sequences.
+	// Skip while overlays are visible so protocol output can't draw above dialogs/popups.
+	if protocolIV != nil {
+		if overlayVisible {
+			// Force redraw once overlay closes in case the graphics plane changed.
+			protocolIV.MarkDirty()
+		} else {
+			e.protocolImageHidden = false
+			protocolIV.RenderProtocolImage()
+		}
+	} else {
+		e.protocolImageHidden = false
+	}
 }
 
 func (e *Editor) renderEditor(x, y, w, h int) {
@@ -441,7 +493,8 @@ func (e *Editor) renderEditor(x, y, w, h int) {
 							}
 							e.screen.SetContent(screenCol+screenDisplayCol, screenY, ch, nil, style)
 						}
-						displayCol++
+						w := runewidth.RuneWidth(ch)
+						displayCol += w
 						col++
 					}
 				}
@@ -484,7 +537,8 @@ func (e *Editor) renderEditor(x, y, w, h int) {
 						}
 						e.screen.SetContent(screenCol+screenDisplayCol, screenY, ch, nil, style)
 					}
-					displayCol++
+					w := runewidth.RuneWidth(ch)
+					displayCol += w
 					col++
 				}
 			}
@@ -495,9 +549,11 @@ func (e *Editor) renderEditor(x, y, w, h int) {
 		if startClear < 0 {
 			startClear = 0
 		}
+		lineRuneLen := buffer.RuneLen(line)
 		for c := startClear; c < textW; c++ {
 			style := lineStyle
-			if e.isSelected(buf, lineIdx, view.scrollX+c) {
+			// Past end of line, use rune length for selection check
+			if e.isSelected(buf, lineIdx, lineRuneLen) {
 				style = selStyle
 			}
 			e.screen.SetContent(screenCol+c, screenY, ' ', nil, style)
@@ -574,7 +630,7 @@ func (e *Editor) renderEditor(x, y, w, h int) {
 						if r == '\t' {
 							dispCol += tabSize - (dispCol % tabSize)
 						} else {
-							dispCol++
+							dispCol += runewidth.RuneWidth(r)
 						}
 						bufCol++
 					}
@@ -592,8 +648,9 @@ func (e *Editor) renderEditor(x, y, w, h int) {
 				screenDisplayCol := ecDisplayCol - view.scrollX
 				if screenDisplayCol >= 0 && screenDisplayCol < textW {
 					ch := ' '
-					if ec.Col < len(line) {
-						ch = rune(line[ec.Col])
+					lineRunes := []rune(line)
+					if ec.Col < len(lineRunes) {
+						ch = lineRunes[ec.Col]
 					}
 					e.screen.SetContent(screenCol+screenDisplayCol, screenY, ch, nil, extraCursorStyle)
 				}
@@ -626,7 +683,7 @@ func (e *Editor) renderEditor(x, y, w, h int) {
 					endCol = startCol + 1
 				}
 				for c := startCol; c < endCol; c++ {
-					dc := c - view.scrollX
+					dc := bufferColToDisplayCol(line, c, buf.TabSize) - view.scrollX
 					if dc >= 0 && dc < textW {
 						mainC, combC, st, _ := e.screen.GetContent(screenCol+dc, screenY)
 						st = st.Foreground(diagColor).Underline(true)
@@ -830,7 +887,7 @@ func (e *Editor) renderEditorWrapped(x, y, w, h int, buf *buffer.Buffer, view *E
 								style = bracketStyle
 							}
 							e.screen.SetContent(screenCol+displayCol, screenY, ch, nil, style)
-							displayCol++
+							displayCol += runewidth.RuneWidth(ch)
 						}
 						col++
 					}
@@ -849,7 +906,7 @@ func (e *Editor) renderEditorWrapped(x, y, w, h int, buf *buffer.Buffer, view *E
 							style = bracketStyle
 						}
 						e.screen.SetContent(screenCol+displayCol, screenY, ch, nil, style)
-						displayCol++
+						displayCol += runewidth.RuneWidth(ch)
 					}
 					col++
 				}
@@ -1008,9 +1065,10 @@ func (e *Editor) ensureCursorVisible(view *EditorView, buf *buffer.Buffer, textW
 		view.scrollY = buf.Cursor.Line
 	}
 
-	// Horizontal
-	if buf.Cursor.Col < view.scrollX {
-		view.scrollX = buf.Cursor.Col
+	// Horizontal — scrollX is in display columns
+	cursorDisplayCol := bufferColToDisplayCol(buf.Lines[buf.Cursor.Line], buf.Cursor.Col, buf.TabSize)
+	if cursorDisplayCol < view.scrollX {
+		view.scrollX = cursorDisplayCol
 	}
 	rightLimit := (textW * 7) / 10
 	if rightLimit < 1 {
@@ -1019,8 +1077,8 @@ func (e *Editor) ensureCursorVisible(view *EditorView, buf *buffer.Buffer, textW
 	if rightLimit >= textW {
 		rightLimit = textW - 1
 	}
-	if buf.Cursor.Col > view.scrollX+rightLimit {
-		view.scrollX = buf.Cursor.Col - rightLimit
+	if cursorDisplayCol > view.scrollX+rightLimit {
+		view.scrollX = cursorDisplayCol - rightLimit
 	}
 }
 

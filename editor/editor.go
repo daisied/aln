@@ -58,6 +58,11 @@ type Editor struct {
 	// Editor view state per buffer
 	views map[*buffer.Buffer]*EditorView
 
+	// Image viewer for image files
+	imageViews          map[*buffer.Buffer]*ui.ImageView
+	needsSync           bool // force full screen Sync on next render
+	protocolImageHidden bool // true when protocol image is temporarily cleared for overlays
+
 	// Mouse drag tracking
 	mouseDown                bool
 	mouseAnchor              buffer.Cursor
@@ -85,6 +90,9 @@ type Editor struct {
 	lspManager   *lsp.Manager
 	autocomplete *ui.Autocomplete
 
+	// Bracketed paste state (suppresses auto-indent and auto-close)
+	pasting bool
+
 	// Cursor blinking
 	cursorVisible bool
 	lastBlinkTime time.Time
@@ -111,11 +119,13 @@ func New(cfg *config.Config) *Editor {
 		cfg:         cfg,
 		highlight:   highlight.New(),
 		gitGutter:   NewGitGutter(),
+		activeTab:   -1,
 		treeOpen:    true,
 		treeWidth:   cfg.TreeWidth,
 		termRatio:   cfg.TermRatio,
 		focusTarget: "editor",
 		views:       make(map[*buffer.Buffer]*EditorView),
+		imageViews:  make(map[*buffer.Buffer]*ui.ImageView),
 		previewTab:  -1,
 	}
 }
@@ -240,8 +250,10 @@ func (e *Editor) Run(files []string, isDirOpen bool) error {
 					if buf.Path == oldPath {
 						buf.Path = newPath
 						buf.Language = highlight.DetectLanguage(newPath)
-						e.tabBar.Tabs[i].Title = newName
-						e.tabBar.Tabs[i].Path = newPath
+						if i < len(e.tabBar.Tabs) {
+							e.tabBar.Tabs[i].Title = newName
+							e.tabBar.Tabs[i].Path = newPath
+						}
 						break
 					}
 				}
@@ -330,6 +342,12 @@ func (e *Editor) Run(files []string, isDirOpen bool) error {
 					e.terminal.Resize(termH-1, termW)
 				}
 			}
+			// Invalidate image renders on resize
+			for _, iv := range e.imageViews {
+				iv.ClearProtocolImage()
+				iv.InvalidateRender()
+			}
+			e.needsSync = true
 		case *tcell.EventKey:
 			e.handleKey(ev)
 		case *tcell.EventMouse:
@@ -340,6 +358,11 @@ func (e *Editor) Run(files []string, isDirOpen bool) error {
 			}
 		case *FileWatchEvent:
 			e.handleFileWatchEvent(ev)
+		case *tcell.EventPaste:
+			e.pasting = ev.Start()
+			if buf := e.activeBuffer(); buf != nil {
+				buf.Pasting = e.pasting
+			}
 		}
 	}
 
@@ -386,6 +409,42 @@ func (e *Editor) openFile(path string) {
 		fileExists = false
 	}
 
+	// Image file: open in image viewer instead of text buffer
+	if fileExists && ui.IsImageFile(path) {
+		iv := ui.NewImageView(path, e.cfg.ImageProtocol)
+		iv.SetTheme(e.cfg.GetTheme())
+
+		// If image temp tabs is enabled, close existing image tab first
+		if e.cfg.ImageTempTabs {
+			for i := len(e.buffers) - 1; i >= 0; i-- {
+				if oldIV, ok := e.imageViews[e.buffers[i]]; ok {
+					oldIV.ClearProtocolImage()
+					e.needsSync = true
+					e.removeTab(i)
+					e.quit = false // removeTab may set quit if it was the last tab
+					if e.activeTab >= len(e.buffers) {
+						e.activeTab = len(e.buffers) - 1
+					}
+					break
+				}
+			}
+		}
+
+		// Create a minimal buffer to hold the tab slot
+		buf := buffer.NewBuffer(e.cfg.TabSize)
+		buf.Path = path
+		buf.ReadOnly = true
+		buf.Language = "image"
+		e.buffers = append(e.buffers, buf)
+		e.views[buf] = &EditorView{}
+		e.imageViews[buf] = iv
+		e.tabBar.AddTab(path, false)
+		e.switchTab(len(e.buffers) - 1)
+		e.statusBar.Message = fmt.Sprintf("🖼 %s", filepath.Base(path))
+		e.updateStatus()
+		return
+	}
+
 	buf, err := buffer.NewBufferFromFile(path, e.cfg.TabSize)
 	if err != nil {
 		e.setTemporaryError("Error: " + err.Error())
@@ -396,14 +455,8 @@ func (e *Editor) openFile(path string) {
 	e.buffers = append(e.buffers, buf)
 	e.views[buf] = &EditorView{}
 	e.tabBar.AddTab(path, false)
-	e.activeTab = len(e.buffers) - 1
-	e.gitGutter.Update(path)
+	e.switchTab(len(e.buffers) - 1)
 	e.lspManager.DidOpen(buf.Language, path, strings.Join(buf.Lines, "\n"))
-
-	// Sync file tree selection
-	if e.treeOpen && e.fileTree != nil {
-		e.fileTree.SelectPath(path)
-	}
 
 	// Set status message based on file state
 	if !fileExists {
@@ -436,10 +489,21 @@ func (e *Editor) openFilePreview(path string) {
 		fileExists = false
 	}
 
+	// Image files go through the normal openFile path (no preview mode)
+	if fileExists && ui.IsImageFile(path) {
+		e.openFile(path)
+		return
+	}
+
 	// If there's an existing preview tab, replace it
-	if e.previewTab >= 0 && e.previewTab < len(e.buffers) {
+	if e.previewTab >= 0 && e.previewTab < len(e.buffers) && e.previewTab < len(e.tabBar.Tabs) {
 		oldBuf := e.buffers[e.previewTab]
 		if !oldBuf.Dirty {
+			// Clean up any old image view
+			if iv, ok := e.imageViews[oldBuf]; ok {
+				iv.Close()
+				delete(e.imageViews, oldBuf)
+			}
 			// Replace the preview tab content
 			newBuf, err := buffer.NewBufferFromFile(path, e.cfg.TabSize)
 			if err != nil {
@@ -480,14 +544,8 @@ func (e *Editor) openFilePreview(path string) {
 	e.tabBar.AddTab(path, false)
 	e.tabBar.Tabs[len(e.tabBar.Tabs)-1].Preview = true
 	e.previewTab = len(e.buffers) - 1
-	e.activeTab = e.previewTab
-	e.gitGutter.Update(path)
+	e.switchTab(e.previewTab)
 	e.lspManager.DidOpen(buf.Language, path, strings.Join(buf.Lines, "\n"))
-
-	// Sync file tree selection
-	if e.treeOpen && e.fileTree != nil {
-		e.fileTree.SelectPath(path)
-	}
 
 	// Set status message
 	if !fileExists {
@@ -503,21 +561,39 @@ func (e *Editor) openEmptyBuffer() {
 	buf.AutoCloseEnabled = e.cfg.AutoClose
 	e.buffers = append(e.buffers, buf)
 	e.views[buf] = &EditorView{}
-	e.tabBar.AddTab("", false)
-	e.activeTab = len(e.buffers) - 1
+	// Don't use AddTab here — its dedup check merges all untitled tabs.
+	// Each empty buffer gets its own tab.
+	e.tabBar.Tabs = append(e.tabBar.Tabs, ui.Tab{Title: "untitled", Path: ""})
+	e.switchTab(len(e.buffers) - 1)
 }
 
 func (e *Editor) switchTab(idx int) {
 	if idx >= 0 && idx < len(e.buffers) {
+		// Clear Kitty images from the old tab if applicable
+		if e.activeTab >= 0 && e.activeTab < len(e.buffers) {
+			if iv, ok := e.imageViews[e.buffers[e.activeTab]]; ok {
+				iv.ClearProtocolImage()
+				e.needsSync = true
+			}
+		}
+
 		// Clear multi-cursor state from previous buffer
 		if e.activeTab >= 0 && e.activeTab < len(e.buffers) {
 			e.buffers[e.activeTab].ClearExtraCursors()
 		}
 
+		// Clear stale selection anchor from previous buffer
+		selectionAnchor = nil
+
 		e.activeTab = idx
 		e.tabBar.Active = idx
 		e.gitGutter.Update(e.buffers[idx].Path)
 		e.updateStatus()
+
+		// Invalidate image render for the new active tab
+		if iv, ok := e.imageViews[e.buffers[idx]]; ok {
+			iv.InvalidateRender()
+		}
 
 		// Sync file tree selection
 		if e.treeOpen && e.fileTree != nil {
@@ -561,6 +637,13 @@ func (e *Editor) removeTab(idx int) {
 	}
 	buf := e.buffers[idx]
 	delete(e.views, buf)
+	// Clean up image view if present
+	if iv, ok := e.imageViews[buf]; ok {
+		iv.ClearProtocolImage()
+		e.needsSync = true
+		iv.Close()
+		delete(e.imageViews, buf)
+	}
 	e.highlight.InvalidateCache(buf.Path)
 	e.buffers = append(e.buffers[:idx], e.buffers[idx+1:]...)
 	e.tabBar.RemoveTab(idx)
@@ -654,14 +737,29 @@ func (e *Editor) promptSudoSave(buf *buffer.Buffer, path string, onSuccess func(
 func (e *Editor) saveWithSudo(buf *buffer.Buffer, path, password string) error {
 	content := buf.BuildSaveContent(e.cfg.TrimTrailingSpace, e.cfg.InsertFinalNewline)
 
-	cmd := exec.Command("sudo", "-S", "tee", path)
-	cmd.Stdin = bytes.NewBufferString(password + "\n" + content)
+	// Validate credentials first so password input is never mixed with file content.
+	authCmd := exec.Command("sudo", "-S", "-k", "-p", "", "-v")
+	authCmd.Stdin = strings.NewReader(password + "\n")
+	authCmd.Stdout = io.Discard
+	var authErr bytes.Buffer
+	authCmd.Stderr = &authErr
+	if err := authCmd.Run(); err != nil {
+		msg := strings.TrimSpace(authErr.String())
+		if msg == "" {
+			return err
+		}
+		return errors.New(msg)
+	}
+
+	// Then write content using non-interactive sudo to avoid stdin password prompts.
+	cmd := exec.Command("sudo", "-n", "tee", path)
+	cmd.Stdin = strings.NewReader(content)
 	cmd.Stdout = io.Discard
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	var writeErr bytes.Buffer
+	cmd.Stderr = &writeErr
 
 	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
+		msg := strings.TrimSpace(writeErr.String())
 		if msg == "" {
 			return err
 		}
@@ -736,8 +834,8 @@ func (e *Editor) performReload() {
 		buf.Cursor.Line = len(buf.Lines) - 1
 	}
 	if buf.Cursor.Line >= 0 && buf.Cursor.Line < len(buf.Lines) {
-		if buf.Cursor.Col > len(buf.Lines[buf.Cursor.Line]) {
-			buf.Cursor.Col = len(buf.Lines[buf.Cursor.Line])
+		if buf.Cursor.Col > buffer.RuneLen(buf.Lines[buf.Cursor.Line]) {
+			buf.Cursor.Col = buffer.RuneLen(buf.Lines[buf.Cursor.Line])
 		}
 	}
 
@@ -1021,6 +1119,24 @@ func (e *Editor) updateStatus() {
 	if e.statusBar.Filename == "." {
 		e.statusBar.Filename = "untitled"
 	}
+
+	// Image view: show image-specific status
+	if iv, ok := e.imageViews[buf]; ok {
+		e.statusBar.Line = 0
+		e.statusBar.Col = 0
+		if w, h := iv.ImageSize(); w > 0 {
+			e.statusBar.Language = fmt.Sprintf("image (%dx%d)", w, h)
+		} else {
+			e.statusBar.Language = "image"
+		}
+		e.statusBar.LineEnd = ""
+		e.statusBar.Encoding = ""
+		e.statusBar.Mode = "VIEW"
+		e.statusBar.SelChars = 0
+		e.statusBar.SelLines = 0
+		return
+	}
+
 	e.statusBar.Line = buf.Cursor.Line
 	e.statusBar.Col = buf.Cursor.Col
 	e.statusBar.Language = buf.Language
@@ -1168,6 +1284,8 @@ func (e *Editor) openQuickOpen() {
 }
 
 func (e *Editor) openCommandPalette() {
+	e.closeFragileModals()
+
 	theme := e.cfg.GetTheme()
 	commands := []ui.Command{
 		{Name: "Save", Shortcut: "Ctrl+S", Action: func() { e.saveCurrentFile() }},
@@ -1178,7 +1296,7 @@ func (e *Editor) openCommandPalette() {
 		{Name: "Find", Shortcut: "Ctrl+F", Action: func() { e.openFindDialog() }},
 		{Name: "Find and Replace", Shortcut: "Ctrl+R", Action: func() { e.openFindReplaceDialog() }},
 		{Name: "Go to Line", Shortcut: "Ctrl+G", Action: func() { e.openGotoLineDialog() }},
-		{Name: "Quick Open", Shortcut: "Ctrl+P", Action: func() { e.openQuickOpen() }},
+		{Name: "Quick Open", Shortcut: "", Action: func() { e.openQuickOpen() }},
 		{Name: "Toggle Word Wrap", Shortcut: "Alt+Z", Action: func() {
 			e.cfg.WordWrap = !e.cfg.WordWrap
 			if e.cfg.WordWrap {

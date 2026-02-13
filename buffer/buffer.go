@@ -7,7 +7,57 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
+
+// RuneLen returns the number of runes in a string.
+func RuneLen(s string) int {
+	return utf8.RuneCountInString(s)
+}
+
+// runeSliceTo returns s[:runeIdx] by rune position.
+func runeSliceTo(s string, runeIdx int) string {
+	b := 0
+	for i := 0; i < runeIdx && b < len(s); i++ {
+		_, size := utf8.DecodeRuneInString(s[b:])
+		b += size
+	}
+	return s[:b]
+}
+
+// runeSliceFrom returns s[runeIdx:] by rune position.
+func runeSliceFrom(s string, runeIdx int) string {
+	b := 0
+	for i := 0; i < runeIdx && b < len(s); i++ {
+		_, size := utf8.DecodeRuneInString(s[b:])
+		b += size
+	}
+	return s[b:]
+}
+
+// runeSlice returns s[start:end] by rune position.
+func runeSlice(s string, start, end int) string {
+	return runeSliceTo(runeSliceFrom(s, start), end-start)
+}
+
+// runeAtIndex returns the rune at rune position idx.
+func runeAtIndex(s string, idx int) rune {
+	b := 0
+	for i := 0; i < idx && b < len(s); i++ {
+		_, size := utf8.DecodeRuneInString(s[b:])
+		b += size
+	}
+	if b >= len(s) {
+		return 0
+	}
+	r, _ := utf8.DecodeRuneInString(s[b:])
+	return r
+}
+
+// runeInsert inserts text at rune position col.
+func runeInsert(s string, col int, text string) string {
+	return runeSliceTo(s, col) + text + runeSliceFrom(s, col)
+}
 
 type Buffer struct {
 	Lines              []string
@@ -19,13 +69,16 @@ type Buffer struct {
 	Undo               *UndoStack
 	Language           string
 	ReadOnly           bool
+	IsBinary           bool
 	TabSize            int
 	LastSaveTime       time.Time   // Track when file was last saved
 	FileSize           int64       // File size in bytes at load time
 	LineEnding         string      // "LF" or "CRLF" — detected from file, preserved on save
 	UseTabs            bool        // Use real tabs instead of spaces
 	AutoCloseEnabled   bool        // Enable automatic closing pairs
+	Pasting            bool        // True during bracketed paste (suppresses auto-indent/auto-close)
 	Encoding           string      // Detected encoding (UTF-8, Latin-1, etc.)
+	HasBOM             bool        // File had UTF-8 BOM
 	ExtraCursors       []Cursor    // additional cursors for multi-cursor editing
 	FoldedLines        map[int]int // maps fold start line -> fold end line (exclusive)
 
@@ -99,6 +152,23 @@ func NewBufferFromFile(path string, tabSize int) (*Buffer, error) {
 	// Encoding detection
 	encoding := detectEncoding(data)
 
+	// Strip UTF-8 BOM if present
+	hasBOM := false
+	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+		data = data[3:]
+		hasBOM = true
+	}
+
+	// Decode non-UTF-8 encodings to UTF-8 for internal use
+	if encoding == "Latin-1" {
+		// Convert Latin-1 bytes to UTF-8
+		runes := make([]rune, len(data))
+		for i, b := range data {
+			runes[i] = rune(b)
+		}
+		data = []byte(string(runes))
+	}
+
 	// Line ending detection: check for CRLF before normalizing
 	lineEnding := "LF"
 	if strings.Contains(string(data), "\r\n") {
@@ -123,10 +193,12 @@ func NewBufferFromFile(path string, tabSize int) (*Buffer, error) {
 		TabSize:          detectedTabSize,
 		UseTabs:          detectedUseTabs,
 		ReadOnly:         isBinary,
+		IsBinary:         isBinary,
 		FileSize:         info.Size(),
 		LineEnding:       lineEnding,
 		AutoCloseEnabled: true,
 		Encoding:         encoding,
+		HasBOM:           hasBOM,
 		FoldedLines:      make(map[int]int),
 		savedSnapshot:    strings.Join(lines, "\n"),
 	}, nil
@@ -302,7 +374,27 @@ func (b *Buffer) SaveWithOptions(trimTrailing, insertFinalNewline bool) error {
 
 	content := b.BuildSaveContent(trimTrailing, insertFinalNewline)
 
-	err := os.WriteFile(b.Path, []byte(content), 0644)
+	var outBytes []byte
+
+	// Re-add BOM if originally present
+	if b.HasBOM {
+		outBytes = append([]byte{0xEF, 0xBB, 0xBF}, []byte(content)...)
+	} else if b.Encoding == "Latin-1" {
+		// Convert UTF-8 back to Latin-1
+		latin1 := make([]byte, 0, len(content))
+		for _, r := range content {
+			if r <= 0xFF {
+				latin1 = append(latin1, byte(r))
+			} else {
+				latin1 = append(latin1, '?') // chars outside Latin-1 range
+			}
+		}
+		outBytes = latin1
+	} else {
+		outBytes = []byte(content)
+	}
+
+	err := os.WriteFile(b.Path, outBytes, 0644)
 	if err == nil {
 		b.MarkSaved()
 		b.LastSaveTime = time.Now()
@@ -333,7 +425,7 @@ func (b *Buffer) clampCursor() {
 	if b.Cursor.Line >= len(b.Lines) {
 		b.Cursor.Line = len(b.Lines) - 1
 	}
-	lineLen := len(b.Lines[b.Cursor.Line])
+	lineLen := RuneLen(b.Lines[b.Cursor.Line])
 	if b.Cursor.Col < 0 {
 		b.Cursor.Col = 0
 	}
@@ -356,10 +448,16 @@ func (b *Buffer) InsertChar(ch rune) {
 	inAutoCloseContext := len(b.autoClosePending) > 0 &&
 		b.Cursor.Line == b.autoClosePos.Line && b.Cursor.Col == b.autoClosePos.Col
 
+	// During paste, clear auto-close state to avoid interference
+	if b.Pasting {
+		b.autoClosePending = nil
+		inAutoCloseContext = false
+	}
+
 	// Check for auto-close swallowing: if user types the expected pending closer
 	// and cursor hasn't moved, skip over it.
 	if inAutoCloseContext && len(b.autoClosePending) > 0 && ch == b.autoClosePending[0] {
-		if b.Cursor.Col < len(line) && rune(line[b.Cursor.Col]) == ch {
+		if b.Cursor.Col < RuneLen(line) && runeAtIndex(line, b.Cursor.Col) == ch {
 			b.Cursor.Col++
 			b.autoClosePending = b.autoClosePending[1:]
 			b.autoClosePos = b.Cursor
@@ -374,10 +472,10 @@ func (b *Buffer) InsertChar(ch rune) {
 	pairs := map[rune]rune{'(': ')', '[': ']', '{': '}'}
 	quotePairs := map[rune]bool{'"': true, '\'': true, '`': true}
 
-	if b.AutoCloseEnabled && b.Language != "" && b.Language != "Text" {
+	if b.AutoCloseEnabled && !b.Pasting && b.Language != "" && b.Language != "Text" {
 		if closeCh, ok := pairs[ch]; ok {
 			text := string(ch) + string(closeCh)
-			b.Lines[b.Cursor.Line] = line[:b.Cursor.Col] + text + line[b.Cursor.Col:]
+			b.Lines[b.Cursor.Line] = runeInsert(line, b.Cursor.Col, text)
 			b.Cursor.Col++
 			b.Dirty = true
 			b.Undo.Push(Operation{Type: OpInsert, Pos: before, Text: text, Before: before})
@@ -393,14 +491,14 @@ func (b *Buffer) InsertChar(ch rune) {
 		}
 		if quotePairs[ch] {
 			// Don't auto-close if the character to the right is a word character
-			if b.Cursor.Col < len(line) {
-				next := rune(line[b.Cursor.Col])
+			if b.Cursor.Col < RuneLen(line) {
+				next := runeAtIndex(line, b.Cursor.Col)
 				if unicode.IsLetter(next) || unicode.IsDigit(next) || next == '_' {
 					goto noAutoClose
 				}
 			}
 			text := string(ch) + string(ch)
-			b.Lines[b.Cursor.Line] = line[:b.Cursor.Col] + text + line[b.Cursor.Col:]
+			b.Lines[b.Cursor.Line] = runeInsert(line, b.Cursor.Col, text)
 			b.Cursor.Col++
 			b.Dirty = true
 			b.Undo.Push(Operation{Type: OpInsert, Pos: before, Text: text, Before: before})
@@ -418,8 +516,8 @@ func (b *Buffer) InsertChar(ch rune) {
 
 noAutoClose:
 	text := string(ch)
-	b.Lines[b.Cursor.Line] = line[:b.Cursor.Col] + text + line[b.Cursor.Col:]
-	b.Cursor.Col++
+	b.Lines[b.Cursor.Line] = runeInsert(line, b.Cursor.Col, text)
+	b.Cursor.Col++ // one rune inserted = advance by 1
 	if inAutoCloseContext && len(b.autoClosePending) > 0 {
 		b.autoClosePos = b.Cursor
 	}
@@ -446,7 +544,7 @@ func (b *Buffer) InsertTab() {
 		b.Cursor.Line == b.autoClosePos.Line && b.Cursor.Col == b.autoClosePos.Col
 	line := b.Lines[b.Cursor.Line]
 	before := b.Cursor
-	b.Lines[b.Cursor.Line] = line[:b.Cursor.Col] + tabString + line[b.Cursor.Col:]
+	b.Lines[b.Cursor.Line] = runeInsert(line, b.Cursor.Col, tabString)
 	if b.UseTabs {
 		b.Cursor.Col += 1
 	} else {
@@ -466,38 +564,42 @@ func (b *Buffer) InsertNewline() {
 	line := b.Lines[b.Cursor.Line]
 	before := b.Cursor
 
-	// Auto-indent: copy leading whitespace from current line
+	// Auto-indent: copy leading whitespace from current line (skip when pasting)
 	indent := ""
-	for _, ch := range line {
-		if ch == ' ' || ch == '\t' {
-			indent += string(ch)
-		} else {
-			break
+	if !b.Pasting {
+		for _, ch := range line {
+			if ch == ' ' || ch == '\t' {
+				indent += string(ch)
+			} else {
+				break
+			}
 		}
 	}
 
 	// Smart indent: add extra indent if line ends with ':'
 	// (for Python, JavaScript, C, etc.)
 	extraIndent := ""
-	trimmedLine := strings.TrimSpace(line[:b.Cursor.Col])
-	if strings.HasSuffix(trimmedLine, ":") {
-		// Add extra indentation (use tab size or 4 spaces)
-		if b.TabSize > 0 {
-			extraIndent = strings.Repeat(" ", b.TabSize)
-		} else {
-			extraIndent = "    " // default to 4 spaces
+	if !b.Pasting {
+		trimmedLine := strings.TrimSpace(runeSliceTo(line, b.Cursor.Col))
+		if strings.HasSuffix(trimmedLine, ":") {
+			// Add extra indentation (use tab size or 4 spaces)
+			if b.TabSize > 0 {
+				extraIndent = strings.Repeat(" ", b.TabSize)
+			} else {
+				extraIndent = "    " // default to 4 spaces
+			}
 		}
 	}
 
-	rest := line[b.Cursor.Col:]
-	b.Lines[b.Cursor.Line] = line[:b.Cursor.Col]
+	rest := runeSliceFrom(line, b.Cursor.Col)
+	b.Lines[b.Cursor.Line] = runeSliceTo(line, b.Cursor.Col)
 	newLine := indent + extraIndent + rest
 	// Insert new line after current
 	b.Lines = append(b.Lines, "")
 	copy(b.Lines[b.Cursor.Line+2:], b.Lines[b.Cursor.Line+1:])
 	b.Lines[b.Cursor.Line+1] = newLine
 	b.Cursor.Line++
-	b.Cursor.Col = len(indent) + len(extraIndent)
+	b.Cursor.Col = RuneLen(indent) + RuneLen(extraIndent)
 	b.Dirty = true
 	b.Undo.Push(Operation{Type: OpInsert, Pos: before, Text: "\n" + indent + extraIndent, Before: before})
 }
@@ -513,12 +615,12 @@ func (b *Buffer) Backspace() {
 		before := b.Cursor
 		inAutoCloseContext := len(b.autoClosePending) > 0 &&
 			b.Cursor.Line == b.autoClosePos.Line && b.Cursor.Col == b.autoClosePos.Col
-		if inAutoCloseContext && b.Cursor.Col < len(line) && len(b.autoClosePending) > 0 {
+		if inAutoCloseContext && b.Cursor.Col < RuneLen(line) && len(b.autoClosePending) > 0 {
 			closeCh := b.autoClosePending[0]
 			openCh, ok := openingFor(closeCh)
-			if ok && rune(line[b.Cursor.Col-1]) == openCh && rune(line[b.Cursor.Col]) == closeCh {
+			if ok && runeAtIndex(line, b.Cursor.Col-1) == openCh && runeAtIndex(line, b.Cursor.Col) == closeCh {
 				deleted := string(openCh) + string(closeCh)
-				b.Lines[b.Cursor.Line] = line[:b.Cursor.Col-1] + line[b.Cursor.Col+1:]
+				b.Lines[b.Cursor.Line] = runeSliceTo(line, b.Cursor.Col-1) + runeSliceFrom(line, b.Cursor.Col+1)
 				b.Cursor.Col--
 				b.autoClosePending = b.autoClosePending[1:]
 				b.autoClosePos = b.Cursor
@@ -527,8 +629,8 @@ func (b *Buffer) Backspace() {
 				return
 			}
 		}
-		deleted := string(line[b.Cursor.Col-1])
-		b.Lines[b.Cursor.Line] = line[:b.Cursor.Col-1] + line[b.Cursor.Col:]
+		deleted := string(runeAtIndex(line, b.Cursor.Col-1))
+		b.Lines[b.Cursor.Line] = runeSliceTo(line, b.Cursor.Col-1) + runeSliceFrom(line, b.Cursor.Col)
 		b.Cursor.Col--
 		if inAutoCloseContext && len(b.autoClosePending) > 0 {
 			b.autoClosePos = b.Cursor
@@ -537,7 +639,7 @@ func (b *Buffer) Backspace() {
 		b.Undo.Push(Operation{Type: OpDelete, Pos: b.Cursor, Text: deleted, Before: before})
 	} else if b.Cursor.Line > 0 {
 		before := b.Cursor
-		prevLen := len(b.Lines[b.Cursor.Line-1])
+		prevLen := RuneLen(b.Lines[b.Cursor.Line-1])
 		b.Lines[b.Cursor.Line-1] += b.Lines[b.Cursor.Line]
 		b.Lines = append(b.Lines[:b.Cursor.Line], b.Lines[b.Cursor.Line+1:]...)
 		b.Cursor.Line--
@@ -555,13 +657,13 @@ func (b *Buffer) Delete() {
 	}
 	b.clampCursor()
 	line := b.Lines[b.Cursor.Line]
-	if b.Cursor.Col < len(line) {
+	if b.Cursor.Col < RuneLen(line) {
 		before := b.Cursor
-		deletedRune := rune(line[b.Cursor.Col])
+		deletedRune := runeAtIndex(line, b.Cursor.Col)
 		deleted := string(deletedRune)
 		inAutoCloseContext := len(b.autoClosePending) > 0 &&
 			b.Cursor.Line == b.autoClosePos.Line && b.Cursor.Col == b.autoClosePos.Col
-		b.Lines[b.Cursor.Line] = line[:b.Cursor.Col] + line[b.Cursor.Col+1:]
+		b.Lines[b.Cursor.Line] = runeSliceTo(line, b.Cursor.Col) + runeSliceFrom(line, b.Cursor.Col+1)
 		if inAutoCloseContext && len(b.autoClosePending) > 0 && deletedRune == b.autoClosePending[0] {
 			b.autoClosePending = b.autoClosePending[1:]
 		}
@@ -601,15 +703,16 @@ func (b *Buffer) DeleteSelection() {
 			return
 		}
 		line := b.Lines[sel.Start.Line]
+		rl := RuneLen(line)
 
-		// Clamp selection bounds to line length
+		// Clamp selection bounds to line length (rune-based)
 		startCol := sel.Start.Col
 		endCol := sel.End.Col
-		if startCol > len(line) {
-			startCol = len(line)
+		if startCol > rl {
+			startCol = rl
 		}
-		if endCol > len(line) {
-			endCol = len(line)
+		if endCol > rl {
+			endCol = rl
 		}
 		if startCol < 0 {
 			startCol = 0
@@ -618,7 +721,7 @@ func (b *Buffer) DeleteSelection() {
 			endCol = 0
 		}
 
-		b.Lines[sel.Start.Line] = line[:startCol] + line[endCol:]
+		b.Lines[sel.Start.Line] = runeSliceTo(line, startCol) + runeSliceFrom(line, endCol)
 	} else {
 		// Multi-line selection - validate bounds
 		if sel.Start.Line < 0 || sel.Start.Line >= len(b.Lines) ||
@@ -630,23 +733,23 @@ func (b *Buffer) DeleteSelection() {
 		firstLine := b.Lines[sel.Start.Line]
 		lastLine := b.Lines[sel.End.Line]
 
-		// Clamp to line lengths
+		// Clamp to line lengths (rune-based)
 		startCol := sel.Start.Col
 		endCol := sel.End.Col
-		if startCol > len(firstLine) {
-			startCol = len(firstLine)
+		if startCol > RuneLen(firstLine) {
+			startCol = RuneLen(firstLine)
 		}
 		if startCol < 0 {
 			startCol = 0
 		}
-		if endCol > len(lastLine) {
-			endCol = len(lastLine)
+		if endCol > RuneLen(lastLine) {
+			endCol = RuneLen(lastLine)
 		}
 		if endCol < 0 {
 			endCol = 0
 		}
 
-		b.Lines[sel.Start.Line] = firstLine[:startCol] + lastLine[endCol:]
+		b.Lines[sel.Start.Line] = runeSliceTo(firstLine, startCol) + runeSliceFrom(lastLine, endCol)
 		b.Lines = append(b.Lines[:sel.Start.Line+1], b.Lines[sel.End.Line+1:]...)
 	}
 
@@ -671,36 +774,37 @@ func (b *Buffer) GetSelectedText() string {
 
 	if sel.Start.Line == sel.End.Line {
 		line := b.Lines[sel.Start.Line]
+		rl := RuneLen(line)
 
-		// Clamp column bounds
+		// Clamp column bounds (rune-based)
 		startCol := sel.Start.Col
 		endCol := sel.End.Col
-		if startCol > len(line) {
-			startCol = len(line)
+		if startCol > rl {
+			startCol = rl
 		}
 		if startCol < 0 {
 			startCol = 0
 		}
-		if endCol > len(line) {
-			endCol = len(line)
+		if endCol > rl {
+			endCol = rl
 		}
 		if endCol < 0 {
 			endCol = 0
 		}
 
-		return line[startCol:endCol]
+		return runeSlice(line, startCol, endCol)
 	}
 
 	var sb strings.Builder
 	firstLine := b.Lines[sel.Start.Line]
 	startCol := sel.Start.Col
-	if startCol > len(firstLine) {
-		startCol = len(firstLine)
+	if startCol > RuneLen(firstLine) {
+		startCol = RuneLen(firstLine)
 	}
 	if startCol < 0 {
 		startCol = 0
 	}
-	sb.WriteString(firstLine[startCol:])
+	sb.WriteString(runeSliceFrom(firstLine, startCol))
 
 	for i := sel.Start.Line + 1; i < sel.End.Line; i++ {
 		sb.WriteByte('\n')
@@ -710,13 +814,13 @@ func (b *Buffer) GetSelectedText() string {
 	sb.WriteByte('\n')
 	lastLine := b.Lines[sel.End.Line]
 	endCol := sel.End.Col
-	if endCol > len(lastLine) {
-		endCol = len(lastLine)
+	if endCol > RuneLen(lastLine) {
+		endCol = RuneLen(lastLine)
 	}
 	if endCol < 0 {
 		endCol = 0
 	}
-	sb.WriteString(lastLine[:endCol])
+	sb.WriteString(runeSliceTo(lastLine, endCol))
 
 	return sb.String()
 }
@@ -731,29 +835,31 @@ func (b *Buffer) InsertText(text string) {
 	lines := strings.Split(text, "\n")
 	if len(lines) == 1 {
 		line := b.Lines[b.Cursor.Line]
-		// Extra safety: validate cursor column
-		if b.Cursor.Col > len(line) {
-			b.Cursor.Col = len(line)
+		// Extra safety: validate cursor column (rune-based)
+		rl := RuneLen(line)
+		if b.Cursor.Col > rl {
+			b.Cursor.Col = rl
 		}
 		if b.Cursor.Col < 0 {
 			b.Cursor.Col = 0
 		}
-		b.Lines[b.Cursor.Line] = line[:b.Cursor.Col] + text + line[b.Cursor.Col:]
-		b.Cursor.Col += len(text)
+		b.Lines[b.Cursor.Line] = runeInsert(line, b.Cursor.Col, text)
+		b.Cursor.Col += RuneLen(text)
 		if inAutoCloseContext && len(b.autoClosePending) > 0 {
 			b.autoClosePos = b.Cursor
 		}
 	} else {
 		line := b.Lines[b.Cursor.Line]
-		// Extra safety: validate cursor column
-		if b.Cursor.Col > len(line) {
-			b.Cursor.Col = len(line)
+		// Extra safety: validate cursor column (rune-based)
+		rl := RuneLen(line)
+		if b.Cursor.Col > rl {
+			b.Cursor.Col = rl
 		}
 		if b.Cursor.Col < 0 {
 			b.Cursor.Col = 0
 		}
-		rest := line[b.Cursor.Col:]
-		b.Lines[b.Cursor.Line] = line[:b.Cursor.Col] + lines[0]
+		rest := runeSliceFrom(line, b.Cursor.Col)
+		b.Lines[b.Cursor.Line] = runeSliceTo(line, b.Cursor.Col) + lines[0]
 
 		newLines := make([]string, len(lines)-1)
 		for i := 1; i < len(lines); i++ {
@@ -766,7 +872,7 @@ func (b *Buffer) InsertText(text string) {
 		b.Lines = append(b.Lines, after...)
 
 		b.Cursor.Line += len(lines) - 1
-		b.Cursor.Col = len(lines[len(lines)-1])
+		b.Cursor.Col = RuneLen(lines[len(lines)-1])
 		b.autoClosePending = nil
 	}
 
@@ -800,6 +906,12 @@ func (b *Buffer) IndentSelection() {
 
 	// Has selection - indent all selected lines
 	sel := *b.Selection
+	// Validate selection bounds
+	if sel.Start.Line < 0 || sel.Start.Line >= len(b.Lines) ||
+		sel.End.Line < 0 || sel.End.Line >= len(b.Lines) {
+		b.Selection = nil
+		return
+	}
 	for i := sel.Start.Line; i <= sel.End.Line; i++ {
 		b.Lines[i] = indentString + b.Lines[i]
 	}
@@ -855,6 +967,12 @@ func (b *Buffer) DedentSelection() {
 
 	// Has selection - dedent all selected lines
 	sel := *b.Selection
+	// Validate selection bounds
+	if sel.Start.Line < 0 || sel.Start.Line >= len(b.Lines) ||
+		sel.End.Line < 0 || sel.End.Line >= len(b.Lines) {
+		b.Selection = nil
+		return
+	}
 	for i := sel.Start.Line; i <= sel.End.Line; i++ {
 		line := b.Lines[i]
 		removed := 0
@@ -969,6 +1087,12 @@ func (b *Buffer) ToggleLineComment(commentStr string) {
 		endLine = b.Selection.End.Line
 	}
 
+	// Validate bounds
+	if startLine < 0 || startLine >= len(b.Lines) || endLine < 0 || endLine >= len(b.Lines) {
+		b.Selection = nil
+		return
+	}
+
 	// Check if all lines are commented
 	allCommented := true
 	prefix := commentStr + " "
@@ -1012,7 +1136,7 @@ func (b *Buffer) SelectAll() {
 	lastLine := len(b.Lines) - 1
 	sel := NewSelection(
 		Cursor{Line: 0, Col: 0},
-		Cursor{Line: lastLine, Col: len(b.Lines[lastLine])},
+		Cursor{Line: lastLine, Col: RuneLen(b.Lines[lastLine])},
 	)
 	b.Selection = &sel
 	b.Cursor = sel.End
@@ -1023,26 +1147,27 @@ func (b *Buffer) WordAt(line, col int) (start, end int) {
 		return col, col
 	}
 	l := b.Lines[line]
-	if col >= len(l) {
-		return len(l), len(l)
+	runes := []rune(l)
+	if col >= len(runes) {
+		return len(runes), len(runes)
 	}
 
-	r := rune(l[col])
+	r := runes[col]
 	isWord := unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
 
 	start = col
 	end = col
 	if isWord {
 		for start > 0 {
-			r := rune(l[start-1])
+			r := runes[start-1]
 			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
 				start--
 			} else {
 				break
 			}
 		}
-		for end < len(l) {
-			r := rune(l[end])
+		for end < len(runes) {
+			r := runes[end]
 			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
 				end++
 			} else {
@@ -1090,20 +1215,20 @@ func (b *Buffer) MoveWordLeft() {
 	if b.Cursor.Col == 0 {
 		if b.Cursor.Line > 0 {
 			b.Cursor.Line--
-			b.Cursor.Col = len(b.Lines[b.Cursor.Line])
+			b.Cursor.Col = RuneLen(b.Lines[b.Cursor.Line])
 		}
 		return
 	}
-	line := b.Lines[b.Cursor.Line]
+	runes := []rune(b.Lines[b.Cursor.Line])
 	col := b.Cursor.Col - 1
 	// Skip whitespace
-	for col > 0 && charClass(rune(line[col])) == 0 {
+	for col > 0 && charClass(runes[col]) == 0 {
 		col--
 	}
 	// Skip contiguous chars of the same class
-	if col >= 0 && col < len(line) {
-		cls := charClass(rune(line[col]))
-		for col > 0 && charClass(rune(line[col-1])) == cls {
+	if col >= 0 && col < len(runes) {
+		cls := charClass(runes[col])
+		for col > 0 && charClass(runes[col-1]) == cls {
 			col--
 		}
 	}
@@ -1112,8 +1237,8 @@ func (b *Buffer) MoveWordLeft() {
 
 func (b *Buffer) MoveWordRight() {
 	b.clampCursor()
-	line := b.Lines[b.Cursor.Line]
-	if b.Cursor.Col >= len(line) {
+	runes := []rune(b.Lines[b.Cursor.Line])
+	if b.Cursor.Col >= len(runes) {
 		if b.Cursor.Line < len(b.Lines)-1 {
 			b.Cursor.Line++
 			b.Cursor.Col = 0
@@ -1123,26 +1248,26 @@ func (b *Buffer) MoveWordRight() {
 	col := b.Cursor.Col
 
 	// Get class of current char
-	cls := charClass(rune(line[col]))
+	cls := charClass(runes[col])
 
 	if cls == 0 {
 		// On whitespace: skip whitespace, then skip next chunk
-		for col < len(line) && charClass(rune(line[col])) == 0 {
+		for col < len(runes) && charClass(runes[col]) == 0 {
 			col++
 		}
-		if col < len(line) {
-			nextCls := charClass(rune(line[col]))
-			for col < len(line) && charClass(rune(line[col])) == nextCls {
+		if col < len(runes) {
+			nextCls := charClass(runes[col])
+			for col < len(runes) && charClass(runes[col]) == nextCls {
 				col++
 			}
 		}
 	} else {
 		// On word or symbol: skip contiguous same-class chars
-		for col < len(line) && charClass(rune(line[col])) == cls {
+		for col < len(runes) && charClass(runes[col]) == cls {
 			col++
 		}
 		// Then skip trailing whitespace
-		for col < len(line) && charClass(rune(line[col])) == 0 {
+		for col < len(runes) && charClass(runes[col]) == 0 {
 			col++
 		}
 	}
@@ -1164,20 +1289,20 @@ func (b *Buffer) DeleteWordBackward() {
 		return
 	}
 
-	line := b.Lines[b.Cursor.Line]
+	runes := []rune(b.Lines[b.Cursor.Line])
 	startCol := b.Cursor.Col
 	col := b.Cursor.Col - 1
 
 	// Skip whitespace backward
-	for col > 0 && charClass(rune(line[col])) == 0 {
+	for col > 0 && charClass(runes[col]) == 0 {
 		col--
 	}
 
 	// Skip contiguous chars of the same class backward
-	if col >= 0 && col < len(line) {
-		cls := charClass(rune(line[col]))
+	if col >= 0 && col < len(runes) {
+		cls := charClass(runes[col])
 		if cls != 0 {
-			for col > 0 && charClass(rune(line[col-1])) == cls {
+			for col > 0 && charClass(runes[col-1]) == cls {
 				col--
 			}
 		}
@@ -1186,8 +1311,8 @@ func (b *Buffer) DeleteWordBackward() {
 	// Delete the text
 	if col < startCol {
 		before := b.Cursor
-		deleted := line[col:startCol]
-		b.Lines[b.Cursor.Line] = line[:col] + line[startCol:]
+		deleted := string(runes[col:startCol])
+		b.Lines[b.Cursor.Line] = string(runes[:col]) + string(runes[startCol:])
 		b.Cursor.Col = col
 		b.Dirty = true
 		b.Undo.Push(Operation{Type: OpDelete, Pos: b.Cursor, Text: deleted, Before: before})
@@ -1201,10 +1326,10 @@ func (b *Buffer) DeleteWordForward() {
 	}
 	b.clampCursor()
 
-	line := b.Lines[b.Cursor.Line]
+	runes := []rune(b.Lines[b.Cursor.Line])
 
 	// If at end of line, join with next line (like Delete key)
-	if b.Cursor.Col >= len(line) {
+	if b.Cursor.Col >= len(runes) {
 		b.Delete()
 		return
 	}
@@ -1213,20 +1338,20 @@ func (b *Buffer) DeleteWordForward() {
 	col := b.Cursor.Col
 
 	// Get class of current char
-	cls := charClass(rune(line[col]))
+	cls := charClass(runes[col])
 
 	if cls == 0 {
 		// On whitespace: skip whitespace
-		for col < len(line) && charClass(rune(line[col])) == 0 {
+		for col < len(runes) && charClass(runes[col]) == 0 {
 			col++
 		}
 	} else {
 		// On word or symbol: skip contiguous same-class chars
-		for col < len(line) && charClass(rune(line[col])) == cls {
+		for col < len(runes) && charClass(runes[col]) == cls {
 			col++
 		}
 		// Then skip trailing whitespace
-		for col < len(line) && charClass(rune(line[col])) == 0 {
+		for col < len(runes) && charClass(runes[col]) == 0 {
 			col++
 		}
 	}
@@ -1234,8 +1359,8 @@ func (b *Buffer) DeleteWordForward() {
 	// Delete the text
 	if col > startCol {
 		before := b.Cursor
-		deleted := line[startCol:col]
-		b.Lines[b.Cursor.Line] = line[:startCol] + line[col:]
+		deleted := string(runes[startCol:col])
+		b.Lines[b.Cursor.Line] = string(runes[:startCol]) + string(runes[col:])
 		b.Dirty = true
 		b.Undo.Push(Operation{Type: OpDelete, Pos: b.Cursor, Text: deleted, Before: before})
 	}
@@ -1252,21 +1377,18 @@ func (b *Buffer) ApplyUndo() {
 	// The first popped op is the most recent; grouped ops are in redo stack
 	// in reverse order (most recent first).
 	if op.Group != 0 {
-		// Collect all grouped ops that were moved to redo (they're at the end)
-		groupOps := []Operation{op}
-		for i := len(b.Undo.redos) - 1; i >= 0; i-- {
-			if b.Undo.redos[i].Group == op.Group {
-				groupOps = append(groupOps, b.Undo.redos[i])
-			} else {
-				break
-			}
+		// Collect the popped group from redo tail (oldest -> newest).
+		groupOps := b.groupOpsFromRedoTail(op.Group)
+		if len(groupOps) == 0 {
+			b.applyInverse(op)
+			return
 		}
-		// Apply all in reverse-chronological order (already in that order)
-		for _, gop := range groupOps {
-			b.applyInverseNoState(gop)
+		// groupOps is oldest -> newest; undo must apply newest -> oldest.
+		for i := len(groupOps) - 1; i >= 0; i-- {
+			b.applyInverseNoState(groupOps[i])
 		}
-		// Restore cursor to earliest op's before position
-		b.Cursor = groupOps[len(groupOps)-1].Before
+		// Restore cursor to earliest op's before position.
+		b.Cursor = groupOps[0].Before
 	} else {
 		b.applyInverse(op)
 		return
@@ -1282,26 +1404,57 @@ func (b *Buffer) ApplyRedo() {
 	}
 
 	if op.Group != 0 {
-		// Collect all grouped ops moved to undo stack
-		groupOps := []Operation{op}
-		for i := len(b.Undo.undos) - 1; i >= 0; i-- {
-			if b.Undo.undos[i].Group == op.Group {
-				groupOps = append(groupOps, b.Undo.undos[i])
-			} else {
-				break
+		// Collect the popped group from undo tail (newest -> oldest).
+		groupOps := b.groupOpsFromUndoTail(op.Group)
+		if len(groupOps) == 0 {
+			b.applyForward(op)
+			return
+		}
+		// Apply in chronological order (oldest -> newest).
+		var cursor Cursor
+		for i := len(groupOps) - 1; i >= 0; i-- {
+			gop := groupOps[i]
+			b.applyForwardNoState(gop)
+			switch gop.Type {
+			case OpInsert:
+				cursor = b.posAfterInsert(gop.Pos, gop.Text)
+			case OpDelete:
+				cursor = gop.Pos
 			}
 		}
-		// Apply in chronological order (reverse of how they were collected)
-		for i := len(groupOps) - 1; i >= 0; i-- {
-			b.applyForwardNoState(groupOps[i])
-		}
-		b.Cursor = b.posAfterInsert(groupOps[0].Pos, groupOps[0].Text)
+		b.Cursor = cursor
 	} else {
 		b.applyForward(op)
 		return
 	}
 	b.Selection = nil
 	b.Dirty = true
+}
+
+// groupOpsFromRedoTail returns contiguous operations at redo tail with groupID.
+// Result order is oldest -> newest.
+func (b *Buffer) groupOpsFromRedoTail(groupID int) []Operation {
+	var ops []Operation
+	for i := len(b.Undo.redos) - 1; i >= 0; i-- {
+		if b.Undo.redos[i].Group != groupID {
+			break
+		}
+		ops = append(ops, b.Undo.redos[i])
+	}
+	return ops
+}
+
+// groupOpsFromUndoTail returns contiguous operations at undo tail with groupID.
+// Result order is newest -> oldest.
+func (b *Buffer) groupOpsFromUndoTail(groupID int) []Operation {
+	var ops []Operation
+	for i := len(b.Undo.undos) - 1; i >= 0; i-- {
+		if b.Undo.undos[i].Group != groupID {
+			break
+		}
+		ops = append(ops, b.Undo.undos[i])
+	}
+	return ops
 }
 
 func (b *Buffer) applyInverseNoState(op Operation) {
@@ -1358,16 +1511,17 @@ func (b *Buffer) insertTextAt(pos Cursor, text string) {
 		return
 	}
 	line := b.Lines[pos.Line]
-	if pos.Col > len(line) {
-		pos.Col = len(line)
+	rl := RuneLen(line)
+	if pos.Col > rl {
+		pos.Col = rl
 	}
 
 	lines := strings.Split(text, "\n")
 	if len(lines) == 1 {
-		b.Lines[pos.Line] = line[:pos.Col] + text + line[pos.Col:]
+		b.Lines[pos.Line] = runeInsert(line, pos.Col, text)
 	} else {
-		rest := line[pos.Col:]
-		b.Lines[pos.Line] = line[:pos.Col] + lines[0]
+		rest := runeSliceFrom(line, pos.Col)
+		b.Lines[pos.Line] = runeSliceTo(line, pos.Col) + lines[0]
 
 		newLines := make([]string, len(lines)-1)
 		for i := 1; i < len(lines); i++ {
@@ -1390,28 +1544,29 @@ func (b *Buffer) removeText(pos Cursor, text string) {
 		return
 	}
 	line := b.Lines[pos.Line]
-	if pos.Col > len(line) {
-		pos.Col = len(line)
+	rl := RuneLen(line)
+	if pos.Col > rl {
+		pos.Col = rl
 	}
 
 	lines := strings.Split(text, "\n")
 	if len(lines) == 1 {
-		end := pos.Col + len(text)
-		if end > len(line) {
-			end = len(line)
+		end := pos.Col + RuneLen(text)
+		if end > rl {
+			end = rl
 		}
-		b.Lines[pos.Line] = line[:pos.Col] + line[end:]
+		b.Lines[pos.Line] = runeSliceTo(line, pos.Col) + runeSliceFrom(line, end)
 	} else {
-		firstPart := line[:pos.Col]
+		firstPart := runeSliceTo(line, pos.Col)
 		lastLineIdx := pos.Line + len(lines) - 1
 		if lastLineIdx >= len(b.Lines) {
 			lastLineIdx = len(b.Lines) - 1
 		}
-		lastLineLen := len(lines[len(lines)-1])
+		lastLineRuneLen := RuneLen(lines[len(lines)-1])
 		lastLine := b.Lines[lastLineIdx]
 		lastPart := ""
-		if lastLineLen < len(lastLine) {
-			lastPart = lastLine[lastLineLen:]
+		if lastLineRuneLen < RuneLen(lastLine) {
+			lastPart = runeSliceFrom(lastLine, lastLineRuneLen)
 		}
 		b.Lines[pos.Line] = firstPart + lastPart
 		b.Lines = append(b.Lines[:pos.Line+1], b.Lines[lastLineIdx+1:]...)
@@ -1421,27 +1576,28 @@ func (b *Buffer) removeText(pos Cursor, text string) {
 func (b *Buffer) posAfterInsert(pos Cursor, text string) Cursor {
 	lines := strings.Split(text, "\n")
 	if len(lines) == 1 {
-		return Cursor{Line: pos.Line, Col: pos.Col + len(text)}
+		return Cursor{Line: pos.Line, Col: pos.Col + RuneLen(text)}
 	}
 	return Cursor{
 		Line: pos.Line + len(lines) - 1,
-		Col:  len(lines[len(lines)-1]),
+		Col:  RuneLen(lines[len(lines)-1]),
 	}
 }
 
-// ReplaceAt replaces `length` characters at the given position with `replacement`.
+// ReplaceAt replaces `length` runes at the given position with `replacement`.
 func (b *Buffer) ReplaceAt(line, col, length int, replacement string) {
 	if line < 0 || line >= len(b.Lines) {
 		return
 	}
 	l := b.Lines[line]
+	rl := RuneLen(l)
 	end := col + length
-	if end > len(l) {
-		end = len(l)
+	if end > rl {
+		end = rl
 	}
 	before := b.Cursor
-	oldText := l[col:end]
-	b.Lines[line] = l[:col] + replacement + l[end:]
+	oldText := runeSlice(l, col, end)
+	b.Lines[line] = runeSliceTo(l, col) + replacement + runeSliceFrom(l, end)
 	b.Dirty = true
 	// Record as delete+insert for undo
 	b.Undo.Push(Operation{Type: OpDelete, Pos: Cursor{Line: line, Col: col}, Text: oldText, Before: before})
@@ -1461,6 +1617,7 @@ func (b *Buffer) WrapSelectionWith(ch rune) bool {
 	}
 
 	line := b.Lines[sel.Start.Line]
+	rl := RuneLen(line)
 	startCol := sel.Start.Col
 	endCol := sel.End.Col
 	if startCol < 0 {
@@ -1469,21 +1626,21 @@ func (b *Buffer) WrapSelectionWith(ch rune) bool {
 	if endCol < 0 {
 		endCol = 0
 	}
-	if startCol > len(line) {
-		startCol = len(line)
+	if startCol > rl {
+		startCol = rl
 	}
-	if endCol > len(line) {
-		endCol = len(line)
+	if endCol > rl {
+		endCol = rl
 	}
 	if endCol <= startCol {
 		return false
 	}
 
 	before := b.Cursor
-	original := line[startCol:endCol]
+	original := runeSlice(line, startCol, endCol)
 	wrapped := string(ch) + original + string(ch)
-	b.Lines[sel.Start.Line] = line[:startCol] + wrapped + line[endCol:]
-	b.Cursor = Cursor{Line: sel.Start.Line, Col: startCol + len(wrapped)}
+	b.Lines[sel.Start.Line] = runeSliceTo(line, startCol) + wrapped + runeSliceFrom(line, endCol)
+	b.Cursor = Cursor{Line: sel.Start.Line, Col: startCol + RuneLen(wrapped)}
 	b.Selection = nil
 	b.autoClosePending = nil
 	b.Dirty = true
@@ -1635,8 +1792,8 @@ func (b *Buffer) AddCursorAt(line, col int) {
 	}
 
 	// Clamp column to line length
-	if col > len(b.Lines[line]) {
-		col = len(b.Lines[line])
+	if col > RuneLen(b.Lines[line]) {
+		col = RuneLen(b.Lines[line])
 	}
 	if col < 0 {
 		col = 0
@@ -1685,15 +1842,15 @@ func (b *Buffer) InsertCharMulti(ch rune) {
 		}
 		line := b.Lines[pos.Line]
 		col := pos.Col
-		if col > len(line) {
-			col = len(line)
+		if col > RuneLen(line) {
+			col = RuneLen(line)
 		}
 		before := *pos
-		b.Lines[pos.Line] = line[:col] + text + line[col:]
+		b.Lines[pos.Line] = runeInsert(line, col, text)
 		b.Undo.PushGrouped(Operation{Type: OpInsert, Pos: before, Text: text, Before: before}, groupID)
 	}
 
-	// Advance all cursors
+	// Advance all cursors by 1 rune
 	for i := len(allCursors) - 1; i >= 0; i-- {
 		allCursors[i].Col++
 	}
@@ -1714,12 +1871,13 @@ func (b *Buffer) DeleteCharMulti() {
 		if pos.Col > 0 {
 			line := b.Lines[pos.Line]
 			col := pos.Col
-			if col > len(line) {
-				col = len(line)
+			rl := RuneLen(line)
+			if col > rl {
+				col = rl
 			}
 			before := *pos
-			deleted := string(line[col-1])
-			b.Lines[pos.Line] = line[:col-1] + line[col:]
+			deleted := string(runeAtIndex(line, col-1))
+			b.Lines[pos.Line] = runeSliceTo(line, col-1) + runeSliceFrom(line, col)
 			b.Undo.PushGrouped(Operation{Type: OpDelete, Pos: Cursor{Line: pos.Line, Col: col - 1}, Text: deleted, Before: before}, groupID)
 			pos.Col = col - 1
 		}
@@ -1738,10 +1896,10 @@ func (b *Buffer) DeleteForwardMulti() {
 			continue
 		}
 		line := b.Lines[pos.Line]
-		if pos.Col < len(line) {
+		if pos.Col < RuneLen(line) {
 			before := *pos
-			deleted := string(line[pos.Col])
-			b.Lines[pos.Line] = line[:pos.Col] + line[pos.Col+1:]
+			deleted := string(runeAtIndex(line, pos.Col))
+			b.Lines[pos.Line] = runeSliceTo(line, pos.Col) + runeSliceFrom(line, pos.Col+1)
 			b.Undo.PushGrouped(Operation{Type: OpDelete, Pos: *pos, Text: deleted, Before: before}, groupID)
 		}
 	}
@@ -1759,7 +1917,7 @@ func (b *Buffer) MoveCursorsLeft() {
 		} else if b.ExtraCursors[i].Line > 0 {
 			b.ExtraCursors[i].Line--
 			if b.ExtraCursors[i].Line >= 0 && b.ExtraCursors[i].Line < len(b.Lines) {
-				b.ExtraCursors[i].Col = len(b.Lines[b.ExtraCursors[i].Line])
+				b.ExtraCursors[i].Col = RuneLen(b.Lines[b.ExtraCursors[i].Line])
 			}
 		}
 	}
@@ -1771,7 +1929,7 @@ func (b *Buffer) MoveCursorsRight() {
 		if b.ExtraCursors[i].Line < 0 || b.ExtraCursors[i].Line >= len(b.Lines) {
 			continue
 		}
-		if b.ExtraCursors[i].Col < len(b.Lines[b.ExtraCursors[i].Line]) {
+		if b.ExtraCursors[i].Col < RuneLen(b.Lines[b.ExtraCursors[i].Line]) {
 			b.ExtraCursors[i].Col++
 		} else if b.ExtraCursors[i].Line < len(b.Lines)-1 {
 			b.ExtraCursors[i].Line++
@@ -1786,7 +1944,7 @@ func (b *Buffer) MoveCursorsUp() {
 		if b.ExtraCursors[i].Line > 0 {
 			b.ExtraCursors[i].Line--
 			if b.ExtraCursors[i].Line >= 0 && b.ExtraCursors[i].Line < len(b.Lines) {
-				lineLen := len(b.Lines[b.ExtraCursors[i].Line])
+				lineLen := RuneLen(b.Lines[b.ExtraCursors[i].Line])
 				if b.ExtraCursors[i].Col > lineLen {
 					b.ExtraCursors[i].Col = lineLen
 				}
@@ -1801,7 +1959,7 @@ func (b *Buffer) MoveCursorsDown() {
 		if b.ExtraCursors[i].Line < len(b.Lines)-1 {
 			b.ExtraCursors[i].Line++
 			if b.ExtraCursors[i].Line >= 0 && b.ExtraCursors[i].Line < len(b.Lines) {
-				lineLen := len(b.Lines[b.ExtraCursors[i].Line])
+				lineLen := RuneLen(b.Lines[b.ExtraCursors[i].Line])
 				if b.ExtraCursors[i].Col > lineLen {
 					b.ExtraCursors[i].Col = lineLen
 				}
@@ -1822,13 +1980,15 @@ func (b *Buffer) SelectNextOccurrence() {
 		return
 	}
 
+	searchRuneLen := RuneLen(searchText)
+
 	// Find the last cursor position to search from after it
 	lastLine := b.Cursor.Line
-	lastCol := b.Cursor.Col + len(searchText)
+	lastCol := b.Cursor.Col + searchRuneLen
 	for _, c := range b.ExtraCursors {
-		if c.Line > lastLine || (c.Line == lastLine && c.Col+len(searchText) > lastCol) {
+		if c.Line > lastLine || (c.Line == lastLine && c.Col+searchRuneLen > lastCol) {
 			lastLine = c.Line
-			lastCol = c.Col + len(searchText)
+			lastCol = c.Col + searchRuneLen
 		}
 	}
 
@@ -1840,32 +2000,37 @@ func (b *Buffer) SelectNextOccurrence() {
 		if lineIdx == lastLine {
 			startCol = lastCol
 		}
-		line := b.Lines[lineIdx]
-		if startCol > len(line) {
+		runes := []rune(b.Lines[lineIdx])
+		if startCol > len(runes) {
 			continue
 		}
-		idx := strings.Index(strings.ToLower(line[startCol:]), searchLower)
+		remainder := string(runes[startCol:])
+		idx := strings.Index(strings.ToLower(remainder), searchLower)
 		if idx >= 0 {
-			b.AddCursorAt(lineIdx, startCol+idx)
+			// Convert byte index back to rune index
+			runeIdx := RuneLen(remainder[:idx])
+			b.AddCursorAt(lineIdx, startCol+runeIdx)
 			return
 		}
 	}
 	// Wrap around from beginning
 	for lineIdx := 0; lineIdx <= lastLine; lineIdx++ {
-		line := b.Lines[lineIdx]
-		endCol := len(line)
+		runes := []rune(b.Lines[lineIdx])
+		endCol := len(runes)
 		if lineIdx == lastLine {
-			endCol = lastCol - len(searchText)
+			endCol = lastCol - searchRuneLen
 			if endCol < 0 {
 				endCol = 0
 			}
 		}
-		if endCol > len(line) {
-			endCol = len(line)
+		if endCol > len(runes) {
+			endCol = len(runes)
 		}
-		idx := strings.Index(strings.ToLower(line[:endCol]), searchLower)
+		portion := string(runes[:endCol])
+		idx := strings.Index(strings.ToLower(portion), searchLower)
 		if idx >= 0 {
-			b.AddCursorAt(lineIdx, idx)
+			runeIdx := RuneLen(portion[:idx])
+			b.AddCursorAt(lineIdx, runeIdx)
 			return
 		}
 	}
@@ -1878,26 +2043,27 @@ func (b *Buffer) GetTextInRange(start, end Cursor) string {
 	}
 	if start.Line == end.Line {
 		line := b.Lines[start.Line]
+		rl := RuneLen(line)
 		sc := start.Col
 		ec := end.Col
-		if sc > len(line) {
-			sc = len(line)
+		if sc > rl {
+			sc = rl
 		}
-		if ec > len(line) {
-			ec = len(line)
+		if ec > rl {
+			ec = rl
 		}
 		if sc >= ec {
 			return ""
 		}
-		return line[sc:ec]
+		return runeSlice(line, sc, ec)
 	}
 	var sb strings.Builder
 	firstLine := b.Lines[start.Line]
 	sc := start.Col
-	if sc > len(firstLine) {
-		sc = len(firstLine)
+	if sc > RuneLen(firstLine) {
+		sc = RuneLen(firstLine)
 	}
-	sb.WriteString(firstLine[sc:])
+	sb.WriteString(runeSliceFrom(firstLine, sc))
 	for i := start.Line + 1; i < end.Line; i++ {
 		sb.WriteByte('\n')
 		sb.WriteString(b.Lines[i])
@@ -1905,10 +2071,10 @@ func (b *Buffer) GetTextInRange(start, end Cursor) string {
 	sb.WriteByte('\n')
 	lastLine := b.Lines[end.Line]
 	ec := end.Col
-	if ec > len(lastLine) {
-		ec = len(lastLine)
+	if ec > RuneLen(lastLine) {
+		ec = RuneLen(lastLine)
 	}
-	sb.WriteString(lastLine[:ec])
+	sb.WriteString(runeSliceTo(lastLine, ec))
 	return sb.String()
 }
 
@@ -1928,12 +2094,12 @@ func (b *Buffer) WordAtCursor() string {
 		return ""
 	}
 	line := b.Lines[b.Cursor.Line]
-	if b.Cursor.Col > len(line) {
+	if b.Cursor.Col > RuneLen(line) {
 		return ""
 	}
 	start, end := b.WordAt(b.Cursor.Line, b.Cursor.Col)
 	if start == end {
 		return ""
 	}
-	return line[start:end]
+	return runeSlice(line, start, end)
 }

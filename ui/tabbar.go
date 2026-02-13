@@ -8,26 +8,26 @@ import (
 )
 
 type Tab struct {
-	Title    string
-	Path     string
-	Modified bool
+	Title              string
+	Path               string
+	Modified           bool
 	ExternallyModified bool // File changed externally while buffer has unsaved changes
-	Preview  bool // Preview tab (italic title, replaced on next file open from tree)
+	Preview            bool // Preview tab (italic title, replaced on next file open from tree)
 }
 
 type TabBar struct {
-	Tabs      []Tab
-	Active    int
-	scrollOff int
-	focused   bool
-	x, y, w   int // layout coords set on render
+	Tabs           []Tab
+	Active         int
+	scrollOff      int
+	focused        bool
+	x, y, w        int // layout coords set on render
 	mouseX, mouseY int // current mouse position for hover effects
-	
+
 	// Mouse press tracking for proper click handling
 	mousePressX, mousePressY int
 	mousePressed             bool
-	
-	Theme     *config.ColorScheme
+
+	Theme *config.ColorScheme
 
 	// Callbacks
 	OnSwitch func(index int)
@@ -36,6 +36,88 @@ type TabBar struct {
 
 func NewTabBar() *TabBar {
 	return &TabBar{mouseX: -1, mouseY: -1}
+}
+
+func (tb *TabBar) tabTitle(tab Tab) string {
+	title := tab.Title
+	if tab.ExternallyModified {
+		title = "!" + title
+	} else if tab.Modified {
+		title = "*" + title
+	}
+	return title
+}
+
+func (tb *TabBar) tabWidthAt(index int) int {
+	if index < 0 || index >= len(tb.Tabs) {
+		return 0
+	}
+	// space + title + space + x + space
+	w := 1 + len([]rune(tb.tabTitle(tb.Tabs[index]))) + 1 + 1 + 1
+	if index < len(tb.Tabs)-1 {
+		w++ // separator
+	}
+	return w
+}
+
+func (tb *TabBar) clampScroll() {
+	if len(tb.Tabs) == 0 {
+		tb.scrollOff = 0
+		return
+	}
+	if tb.scrollOff < 0 {
+		tb.scrollOff = 0
+	}
+	maxOff := len(tb.Tabs) - 1
+	if tb.scrollOff > maxOff {
+		tb.scrollOff = maxOff
+	}
+}
+
+func (tb *TabBar) visibleLast(width int) int {
+	if width <= 0 || len(tb.Tabs) == 0 {
+		return tb.scrollOff - 1
+	}
+	remaining := width
+	last := tb.scrollOff - 1
+	for i := tb.scrollOff; i < len(tb.Tabs); i++ {
+		w := tb.tabWidthAt(i)
+		if w > remaining {
+			break
+		}
+		remaining -= w
+		last = i
+	}
+	return last
+}
+
+func (tb *TabBar) ensureActiveVisible(width int) {
+	tb.clampScroll()
+	if len(tb.Tabs) == 0 || width <= 0 {
+		return
+	}
+	if tb.Active < 0 {
+		tb.Active = 0
+	}
+	if tb.Active >= len(tb.Tabs) {
+		tb.Active = len(tb.Tabs) - 1
+	}
+	if tb.Active < tb.scrollOff {
+		tb.scrollOff = tb.Active
+	}
+	for {
+		last := tb.visibleLast(width)
+		if tb.Active <= last || tb.scrollOff >= tb.Active {
+			break
+		}
+		tb.scrollOff++
+	}
+	tb.clampScroll()
+}
+
+func (tb *TabBar) scrollBy(delta int) {
+	tb.scrollOff += delta
+	tb.clampScroll()
 }
 
 func (tb *TabBar) AddTab(path string, modified bool) {
@@ -52,6 +134,7 @@ func (tb *TabBar) AddTab(path string, modified bool) {
 	}
 	tb.Tabs = append(tb.Tabs, Tab{Title: title, Path: path, Modified: modified})
 	tb.Active = len(tb.Tabs) - 1
+	tb.ensureActiveVisible(tb.w)
 }
 
 func (tb *TabBar) RemoveTab(index int) {
@@ -59,12 +142,16 @@ func (tb *TabBar) RemoveTab(index int) {
 		return
 	}
 	tb.Tabs = append(tb.Tabs[:index], tb.Tabs[index+1:]...)
+	if index < tb.scrollOff {
+		tb.scrollOff--
+	}
 	if tb.Active >= len(tb.Tabs) {
 		tb.Active = len(tb.Tabs) - 1
 	}
 	if tb.Active < 0 {
 		tb.Active = 0
 	}
+	tb.clampScroll()
 }
 
 func (tb *TabBar) SetModified(index int, modified bool) {
@@ -81,7 +168,8 @@ func (tb *TabBar) SetExternallyModified(index int, externallyModified bool) {
 
 func (tb *TabBar) Render(screen tcell.Screen, x, y, width, height int) {
 	tb.x, tb.y, tb.w = x, y, width
-	
+	tb.ensureActiveVisible(width)
+
 	theme := tb.Theme
 	if theme == nil {
 		theme = config.Themes["monokai"]
@@ -89,10 +177,10 @@ func (tb *TabBar) Render(screen tcell.Screen, x, y, width, height int) {
 
 	// Tab bar background uses status bar color for unified look, or specific TabBarBg if defined
 	tabBgStyle := tcell.StyleDefault.Background(theme.TabBarBg).Foreground(theme.TabBarFg)
-	
+
 	// Active tab stands out with its own background
 	activeBg := tcell.StyleDefault.Background(theme.TabBarActiveBg).Foreground(theme.TabBarActiveFg).Bold(true)
-	
+
 	// Inactive tabs use the bar background
 	inactiveBg := tcell.StyleDefault.Background(theme.TabBarBg).Foreground(theme.TabBarFg)
 
@@ -106,18 +194,13 @@ func (tb *TabBar) Render(screen tcell.Screen, x, y, width, height int) {
 	}
 
 	col := x
-	for i, tab := range tb.Tabs {
+	for i := tb.scrollOff; i < len(tb.Tabs); i++ {
+		tab := tb.Tabs[i]
 		if col >= x+width {
 			break
 		}
 
-		// Build tab text: " title [x] "
-		title := tab.Title
-		if tab.ExternallyModified {
-			title = "!" + title
-		} else if tab.Modified {
-			title = "*" + title
-		}
+		title := tb.tabTitle(tab)
 
 		style := inactiveBg
 		closeStyle := closeNormalStyle
@@ -126,12 +209,8 @@ func (tb *TabBar) Render(screen tcell.Screen, x, y, width, height int) {
 			closeStyle = closeActiveNormalStyle
 		} else {
 			// Check for hover on inactive tabs
-			// Calculate tab width: " " + title + " " + "x" + " " = 1 + len + 1 + 1 + 1 = 4 + len
-			tabW := 4 + len([]rune(title))
-			if i < len(tb.Tabs)-1 {
-				tabW++ // separator
-			}
-			
+			tabW := tb.tabWidthAt(i)
+
 			if tb.mouseY == y && tb.mouseX >= col && tb.mouseX < col+tabW {
 				// Use lighter background for hover
 				hoverColor := theme.StatusBarBg.TrueColor().Hex() + 0x101010
@@ -200,17 +279,27 @@ func (tb *TabBar) HandleKey(ev *tcell.EventKey) bool {
 func (tb *TabBar) HandleMouse(ev *tcell.EventMouse) bool {
 	mx, my := ev.Position()
 	btn := ev.Buttons()
-	
+
 	if my != tb.y || mx < tb.x || mx >= tb.x+tb.w {
 		// Mouse outside tab bar - reset position to clear hover effects
 		tb.mouseX, tb.mouseY = -1, -1
 		tb.mousePressed = false
 		return false
 	}
-	
+
 	// Update mouse position for hover effects
 	tb.mouseX, tb.mouseY = mx, my
-	
+
+	// Mouse wheel scrolls hidden tabs horizontally.
+	switch btn {
+	case tcell.WheelUp, tcell.WheelLeft:
+		tb.scrollBy(-1)
+		return true
+	case tcell.WheelDown, tcell.WheelRight:
+		tb.scrollBy(1)
+		return true
+	}
+
 	// Handle mouse press (Button1 down)
 	if btn == tcell.Button1 {
 		if !tb.mousePressed {
@@ -220,27 +309,20 @@ func (tb *TabBar) HandleMouse(ev *tcell.EventMouse) bool {
 		}
 		return true
 	}
-	
+
 	// Handle mouse release (ButtonNone after Button1)
 	if btn == tcell.ButtonNone && tb.mousePressed {
 		tb.mousePressed = false
-		
+
 		// Only trigger click if release happened at same position as press
 		if mx == tb.mousePressX && my == tb.mousePressY {
 			// Determine which tab was clicked
 			col := tb.x
-			for i, tab := range tb.Tabs {
-				title := tab.Title
-				if tab.ExternallyModified {
-					title = "!" + title
-				} else if tab.Modified {
-					title = "*" + title
-				}
-
-				// Tab occupies: space + title + space + x + space
-				tabWidth := 1 + len([]rune(title)) + 1 + 1 + 1
-				if i < len(tb.Tabs)-1 {
-					tabWidth++ // separator
+			for i := tb.scrollOff; i < len(tb.Tabs); i++ {
+				title := tb.tabTitle(tb.Tabs[i])
+				tabWidth := tb.tabWidthAt(i)
+				if col >= tb.x+tb.w {
+					break
 				}
 
 				if mx >= col && mx < col+tabWidth {
@@ -262,10 +344,10 @@ func (tb *TabBar) HandleMouse(ev *tcell.EventMouse) bool {
 		}
 		return true
 	}
-	
+
 	// Mouse is over tab bar but not clicking
 	return true
 }
 
-func (tb *TabBar) IsFocused() bool    { return tb.focused }
-func (tb *TabBar) SetFocused(f bool)  { tb.focused = f }
+func (tb *TabBar) IsFocused() bool   { return tb.focused }
+func (tb *TabBar) SetFocused(f bool) { tb.focused = f }

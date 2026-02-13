@@ -72,8 +72,8 @@ It is built for people living in shells, SSH sessions, tmux, and remote boxes.
 - Preserves encoding and line endings
 
 ### Navigation & search
-- Quick Open (`Ctrl+P`) with fuzzy ranking
-- Command Palette (`Ctrl+Shift+P` / `Ctrl+Space`)
+- Quick Open (from Command Palette) with fuzzy ranking
+- Command Palette (`Ctrl+P` / `Ctrl+Shift+P`)
 - Project search inside palette with `%query`
 - Find + find/replace (+ regex)
 - Match navigation (`F3`, `Shift+F3`)
@@ -219,7 +219,7 @@ aln path/to/directory
 - `Ctrl+E` tree/editor focus
 - `Ctrl+T` toggle terminal
 - `Ctrl+Shift+V` or `Shift+Insert` paste from system clipboard into terminal
-- `Ctrl+Shift+P` or `Ctrl+Space` command palette
+- `Ctrl+P` or `Ctrl+Shift+P` command palette
 - `Ctrl+.` toggle fold
 - `Alt+Z` toggle word wrap
 

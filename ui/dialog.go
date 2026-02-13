@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"editor/config"
 	"github.com/gdamore/tcell/v2"
@@ -41,9 +43,12 @@ type Dialog struct {
 	ReplaceMode   bool // true when find+replace dialog is open
 
 	// Settings state
-	SettingsOptions []string
-	SettingsValues  []string
-	SettingsIndex   int
+	SettingsOptions  []string
+	SettingsValues   []string
+	SettingsIndex    int
+	SettingsSections []SettingsSection
+	SettingsScroll   int
+	SettingsMaxVis   int
 
 	// Theme support
 	Theme *config.ColorScheme
@@ -61,6 +66,12 @@ type Dialog struct {
 	// Generic input dialog prompt
 	Prompt    string
 	MaskInput bool
+}
+
+type SettingsSection struct {
+	Name    string
+	Options []string
+	Indices []int
 }
 
 type Match struct {
@@ -118,6 +129,7 @@ func NewSettingsDialog(options, values []string) *Dialog {
 		SettingsOptions: options,
 		SettingsValues:  values,
 		SettingsIndex:   0,
+		SettingsScroll:  0,
 		focused:         true,
 	}
 }
@@ -350,8 +362,8 @@ func (d *Dialog) renderHelp(screen tcell.Screen, x, y, width, height int) {
 		{"", "Ctrl+N", "New file"},
 		{"", "Ctrl+W", "Close tab"},
 		{"", "Ctrl+Q", "Quit editor"},
-		{"", "Ctrl+P", "Quick open file"},
-		{"", "Ctrl+Shift+P", "Command palette"},
+		{"", "Ctrl+P", "Command palette"},
+		{"", "Ctrl+Shift+P", "Command palette (alt)"},
 		{"", "Alt+1-9, 0", "Switch to tab 1-9, 10"},
 		{"", "Ctrl+Tab", "Next tab"},
 		{"", "Ctrl+Shift+Tab", "Previous tab"},
@@ -383,14 +395,13 @@ func (d *Dialog) renderHelp(screen tcell.Screen, x, y, width, height int) {
 		{"", "Ctrl+Shift+Arrow", "Word selection"},
 		{"", "", ""},
 		{"SEARCH", "", ""},
-		{"", "Ctrl+Shift+P", "Command palette"},
+		{"", "Ctrl+P / Ctrl+Shift+P", "Command palette"},
 		{"", "%<text>", "Search in files (palette)"},
 		{"", "", ""},
 		{"UI & DISPLAY", "", ""},
 		{"", "Ctrl+B", "Toggle file tree"},
 		{"", "Ctrl+E", "Toggle tree focus"},
 		{"", "Ctrl+T", "Toggle terminal"},
-		{"", "Ctrl+Space", "Command palette"},
 		{"", "Ctrl+.", "Toggle code fold"},
 		{"", "Alt+Z", "Toggle word wrap"},
 		{"", "Alt+,", "Settings dialog"},
@@ -733,16 +744,20 @@ func (d *Dialog) FindMatches(lines []string) {
 		for i, line := range lines {
 			locs := re.FindAllStringIndex(line, -1)
 			for _, loc := range locs {
+				// Convert byte offsets to rune indices
+				runeCol := utf8.RuneCountInString(line[:loc[0]])
+				runeLen := utf8.RuneCountInString(line[loc[0]:loc[1]])
 				d.Matches = append(d.Matches, Match{
 					Line:   i,
-					Col:    loc[0],
-					Length: len([]rune(line[loc[0]:loc[1]])),
+					Col:    runeCol,
+					Length: runeLen,
 				})
 			}
 		}
 		return
 	}
 	query := strings.ToLower(d.Input)
+	queryRuneLen := utf8.RuneCountInString(d.Input)
 	for i, line := range lines {
 		lower := strings.ToLower(line)
 		idx := 0
@@ -751,12 +766,15 @@ func (d *Dialog) FindMatches(lines []string) {
 			if pos < 0 {
 				break
 			}
+			bytePos := idx + pos
+			// Convert byte offset to rune index
+			runeCol := utf8.RuneCountInString(line[:bytePos])
 			d.Matches = append(d.Matches, Match{
 				Line:   i,
-				Col:    idx + pos,
-				Length: len([]rune(d.Input)),
+				Col:    runeCol,
+				Length: queryRuneLen,
 			})
-			idx += pos + 1
+			idx = bytePos + len(query)
 		}
 	}
 }
@@ -784,7 +802,6 @@ func (d *Dialog) renderSettings(screen tcell.Screen, x, y, width, height int) {
 		theme = config.Themes["monokai"]
 	}
 
-	// Use theme colors - lighter background like tab/status bar
 	titleStyle := tcell.StyleDefault.Background(theme.StatusBarModeBg).Foreground(tcell.ColorWhite).Bold(true)
 	borderStyle := tcell.StyleDefault.Foreground(theme.TreeBorder).Background(theme.StatusBarBg)
 	bgStyle := tcell.StyleDefault.Background(theme.StatusBarBg).Foreground(theme.StatusBarFg)
@@ -792,30 +809,39 @@ func (d *Dialog) renderSettings(screen tcell.Screen, x, y, width, height int) {
 	labelStyle := tcell.StyleDefault.Background(theme.StatusBarBg).Foreground(theme.TreeHeaderFg)
 	valueStyle := tcell.StyleDefault.Background(theme.StatusBarBg).Foreground(theme.Foreground).Bold(true)
 	footerStyle := tcell.StyleDefault.Background(theme.StatusBarBg).Foreground(theme.LineNumber)
+	sectionStyle := tcell.StyleDefault.Background(theme.StatusBarBg).Foreground(theme.StatusBarFg).Bold(true)
 
-	// Dialog dimensions
-	dialogW := width / 2
-	if dialogW < 50 {
-		dialogW = 50
+	dialogW := width / 3
+	if dialogW < 38 {
+		dialogW = 38
 	}
-	if dialogW > 80 {
-		dialogW = 80
+	if dialogW > 56 {
+		dialogW = 56
 	}
-	dialogH := len(d.SettingsOptions) + 6
-	if dialogH > height-4 {
-		dialogH = height - 4
+	if dialogW > width-1 {
+		dialogW = width - 1
 	}
-	dialogX := x + (width-dialogW)/2
-	dialogY := y + (height-dialogH)/2
+	if dialogW < 3 {
+		return
+	}
+	dialogY := y
+	dialogH := height
+	if height > 2 {
+		// Right sidebar sits between tab bar and status bar.
+		dialogY = y + 1
+		dialogH = height - 2
+	}
+	if dialogH < 3 {
+		return
+	}
+	dialogX := x + width - dialogW
 
-	// Clear dialog area
 	for dy := 0; dy < dialogH; dy++ {
 		for dx := 0; dx < dialogW; dx++ {
 			screen.SetContent(dialogX+dx, dialogY+dy, ' ', nil, bgStyle)
 		}
 	}
 
-	// Draw border
 	for dx := 0; dx < dialogW; dx++ {
 		screen.SetContent(dialogX+dx, dialogY, '─', nil, borderStyle)
 		screen.SetContent(dialogX+dx, dialogY+dialogH-1, '─', nil, borderStyle)
@@ -829,64 +855,174 @@ func (d *Dialog) renderSettings(screen tcell.Screen, x, y, width, height int) {
 	screen.SetContent(dialogX, dialogY+dialogH-1, '└', nil, borderStyle)
 	screen.SetContent(dialogX+dialogW-1, dialogY+dialogH-1, '┘', nil, borderStyle)
 
-	// Title
 	title := " Settings "
 	titleX := dialogX + (dialogW-len(title))/2
 	for i, ch := range title {
 		screen.SetContent(titleX+i, dialogY, ch, nil, titleStyle)
 	}
 
-	// Render options
+	trimToWidth := func(s string, max int) string {
+		if max <= 0 {
+			return ""
+		}
+		r := []rune(s)
+		if len(r) <= max {
+			return s
+		}
+		if max <= 3 {
+			return string(r[:max])
+		}
+		return string(r[:max-3]) + "..."
+	}
+
+	totalLines := 0
+	for _, sec := range d.SettingsSections {
+		totalLines += 2 + len(sec.Indices)
+	}
+	maxVis := dialogH - 4
+	if maxVis < 1 {
+		maxVis = 1
+	}
+	d.SettingsMaxVis = maxVis
+
+	if d.SettingsScroll < 0 {
+		d.SettingsScroll = 0
+	}
+	if totalLines > maxVis {
+		if d.SettingsScroll > totalLines-maxVis {
+			d.SettingsScroll = totalLines - maxVis
+		}
+	} else {
+		d.SettingsScroll = 0
+	}
+
+	arrowStyle := tcell.StyleDefault.Background(theme.StatusBarBg).Foreground(theme.LineNumber)
+	topArrowLine := -1
+	botArrowLine := -1
+	if totalLines > maxVis {
+		if d.SettingsScroll > 0 {
+			topArrowLine = d.SettingsScroll
+		}
+		if d.SettingsScroll+maxVis < totalLines {
+			botArrowLine = d.SettingsScroll + maxVis - 1
+		}
+	}
+
 	row := dialogY + 2
-	for i, option := range d.SettingsOptions {
+	lineNum := 0
+
+	for _, sec := range d.SettingsSections {
 		if row >= dialogY+dialogH-2 {
 			break
 		}
 
-		style := bgStyle
-		if i == d.SettingsIndex {
-			style = selectedStyle
-		}
-
-		// Clear row
-		for cx := dialogX + 2; cx < dialogX+dialogW-2; cx++ {
-			screen.SetContent(cx, row, ' ', nil, style)
-		}
-
-		// Option label
-		col := dialogX + 3
-		optStyle := labelStyle
-		if i == d.SettingsIndex {
-			optStyle = selectedStyle
-		}
-		for _, ch := range option {
-			if col < dialogX+dialogW-20 {
-				screen.SetContent(col, row, ch, nil, optStyle)
-				col++
+		if lineNum == topArrowLine {
+			for cx := dialogX + 2; cx < dialogX+dialogW-2; cx++ {
+				screen.SetContent(cx, row, ' ', nil, bgStyle)
 			}
+			screen.SetContent(dialogX+dialogW/2, row, '▲', nil, arrowStyle)
+			row++
+			lineNum++
 		}
 
-		// Value
-		value := d.SettingsValues[i]
-		valStyle := valueStyle
-		if i == d.SettingsIndex {
-			valStyle = selectedStyle.Bold(true)
+		if lineNum >= d.SettingsScroll && lineNum < d.SettingsScroll+maxVis {
+			row++
 		}
-		valueX := dialogX + dialogW - len(value) - 3
-		for j, ch := range value {
-			screen.SetContent(valueX+j, row, ch, nil, valStyle)
-		}
+		lineNum++
 
-		row++
+		if lineNum >= d.SettingsScroll && lineNum < d.SettingsScroll+maxVis {
+			col := dialogX + 2
+			upperName := trimToWidth("["+strings.ToUpper(sec.Name)+"]", dialogW-4)
+			for _, ch := range upperName {
+				if col < dialogX+dialogW-3 {
+					screen.SetContent(col, row, ch, nil, sectionStyle)
+					col++
+				}
+			}
+			row++
+		}
+		lineNum++
+
+		for idx, optIdx := range sec.Indices {
+			if row >= dialogY+dialogH-2 {
+				break
+			}
+			if lineNum == botArrowLine {
+				for cx := dialogX + 2; cx < dialogX+dialogW-2; cx++ {
+					screen.SetContent(cx, row, ' ', nil, bgStyle)
+				}
+				screen.SetContent(dialogX+dialogW/2, row, '▼', nil, arrowStyle)
+				row++
+				lineNum++
+				continue
+			}
+			if lineNum >= d.SettingsScroll && lineNum < d.SettingsScroll+maxVis {
+				option := sec.Options[idx]
+				value := d.SettingsValues[optIdx]
+
+				style := bgStyle
+				if optIdx == d.SettingsIndex {
+					style = selectedStyle
+				}
+
+				for cx := dialogX + 2; cx < dialogX+dialogW-2; cx++ {
+					screen.SetContent(cx, row, ' ', nil, style)
+				}
+
+				col := dialogX + 4
+				if optIdx == d.SettingsIndex {
+					screen.SetContent(dialogX+2, row, '>', nil, selectedStyle)
+				}
+				optStyle := labelStyle
+				if optIdx == d.SettingsIndex {
+					optStyle = selectedStyle
+				}
+				valueX := dialogX + dialogW - len(value) - 2
+				if valueX <= col {
+					valueX = col + 1
+				}
+				labelMax := valueX - col - 1
+				label := trimToWidth(option, labelMax)
+				for _, ch := range label {
+					if col >= valueX {
+						break
+					}
+					screen.SetContent(col, row, ch, nil, optStyle)
+					col++
+				}
+
+				valStyle := valueStyle
+				if optIdx == d.SettingsIndex {
+					valStyle = selectedStyle.Bold(true)
+				}
+				for j, ch := range value {
+					screen.SetContent(valueX+j, row, ch, nil, valStyle)
+				}
+				row++
+			}
+			lineNum++
+		}
 	}
 
-	// Footer
-	footer := "↑/↓: Navigate | ←/→ or Enter: Change | ESC or Alt+,: Close"
 	footerY := dialogY + dialogH - 1
-	footerX := dialogX + (dialogW-len(footer))/2
-	for i, ch := range footer {
-		if footerX+i < dialogX+dialogW-1 {
-			screen.SetContent(footerX+i, footerY, ch, nil, footerStyle)
+
+	if totalLines > maxVis {
+		posStr := fmt.Sprintf("%d/%d", d.SettingsScroll+1, totalLines)
+		for i, ch := range posStr {
+			if i < len(posStr) {
+				screen.SetContent(dialogX+2+i, footerY, ch, nil, footerStyle)
+			}
+		}
+		helpText := "< > change | ESC close"
+		helpX := dialogX + (dialogW-len(helpText))/2
+		for i, ch := range helpText {
+			screen.SetContent(helpX+i, footerY, ch, nil, footerStyle)
+		}
+	} else {
+		helpText := "< > change | ESC close"
+		helpX := dialogX + (dialogW-len(helpText))/2
+		for i, ch := range helpText {
+			screen.SetContent(helpX+i, footerY, ch, nil, footerStyle)
 		}
 	}
 }
@@ -901,27 +1037,72 @@ func (d *Dialog) handleSettingsKey(ev *tcell.EventKey) bool {
 	case tcell.KeyUp:
 		if d.SettingsIndex > 0 {
 			d.SettingsIndex--
+			d.adjustScrollUp()
 		}
 		return true
 	case tcell.KeyDown:
 		if d.SettingsIndex < len(d.SettingsOptions)-1 {
 			d.SettingsIndex++
+			d.adjustScrollDown()
 		}
 		return true
 	case tcell.KeyRight, tcell.KeyEnter:
-		// Right arrow or Enter - cycle forward
 		if d.OnSettingChange != nil {
 			d.OnSettingChange(d.SettingsIndex, d.SettingsValues[d.SettingsIndex])
 		}
 		return true
 	case tcell.KeyLeft:
-		// Left arrow - cycle backward
 		if d.OnSettingChangeReverse != nil {
 			d.OnSettingChangeReverse(d.SettingsIndex, d.SettingsValues[d.SettingsIndex])
 		}
 		return true
 	}
-	return true
+	return false
+}
+
+func (d *Dialog) getLineForIndex(index int) int {
+	line := 0
+	for _, sec := range d.SettingsSections {
+		for i, idx := range sec.Indices {
+			if idx == index {
+				return line + 2 + i
+			}
+		}
+		line += 2 + len(sec.Indices)
+	}
+	return line
+}
+
+func (d *Dialog) adjustScrollDown() {
+	if d.SettingsMaxVis <= 0 {
+		return
+	}
+	line := d.getLineForIndex(d.SettingsIndex)
+	if line >= d.SettingsScroll+d.SettingsMaxVis {
+		d.SettingsScroll = line - d.SettingsMaxVis + 1
+	}
+	totalLines := 0
+	for _, sec := range d.SettingsSections {
+		totalLines += 2 + len(sec.Indices)
+	}
+	if totalLines > d.SettingsMaxVis && d.SettingsScroll > totalLines-d.SettingsMaxVis {
+		d.SettingsScroll = totalLines - d.SettingsMaxVis
+	}
+}
+
+func (d *Dialog) adjustScrollUp() {
+	if d.SettingsMaxVis <= 0 {
+		return
+	}
+	line := d.getLineForIndex(d.SettingsIndex)
+	if line < d.SettingsScroll {
+		d.SettingsScroll = line
+	} else if d.SettingsIndex == 0 && d.SettingsScroll > 0 {
+		d.SettingsScroll = 0
+	}
+	if d.SettingsScroll < 0 {
+		d.SettingsScroll = 0
+	}
 }
 
 func (d *Dialog) HandleMouse(ev *tcell.EventMouse) bool { return false }

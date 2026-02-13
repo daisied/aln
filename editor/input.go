@@ -37,6 +37,29 @@ func (e *Editor) handleKey(ev *tcell.EventKey) {
 		return
 	}
 
+	// Ctrl+P toggles command palette (open/close)
+	if ev.Key() == tcell.KeyCtrlP {
+		if e.commandPalette != nil {
+			e.commandPalette = nil
+		} else {
+			e.openCommandPalette()
+		}
+		return
+	}
+
+	// Fragile modals: Ctrl+E / Ctrl+T close settings/palette before acting.
+	if ev.Key() == tcell.KeyCtrlE || ev.Key() == tcell.KeyCtrlT {
+		if e.commandPalette != nil || (e.dialog != nil && e.dialog.Type == ui.DialogSettings) {
+			e.closeFragileModals()
+			if ev.Key() == tcell.KeyCtrlT {
+				e.toggleTerminal()
+			} else {
+				e.toggleTreeFocus()
+			}
+			return
+		}
+	}
+
 	// Quick open gets priority
 	if e.quickOpen != nil {
 		e.quickOpen.HandleKey(ev)
@@ -90,7 +113,7 @@ func (e *Editor) handleKey(ev *tcell.EventKey) {
 		e.toggleTreeFocus()
 		return
 	case tcell.KeyCtrlP:
-		e.openQuickOpen()
+		e.openCommandPalette()
 		return
 	case tcell.KeyF12:
 		e.gotoDefinition()
@@ -175,6 +198,36 @@ func (e *Editor) handleKey(ev *tcell.EventKey) {
 		}
 	}
 
+	// Image view: allow navigation/close keys but block editing
+	buf := e.activeBuffer()
+	if buf != nil {
+		if _, isImg := e.imageViews[buf]; isImg {
+			switch ev.Key() {
+			case tcell.KeyCtrlB:
+				e.toggleTree()
+			case tcell.KeyCtrlW:
+				e.closeTab(e.activeTab)
+			case tcell.KeyCtrlQ:
+				e.handleQuit()
+			case tcell.KeyCtrlT:
+				e.toggleTerminal()
+			case tcell.KeyCtrlE:
+				e.toggleTreeFocus()
+			case tcell.KeyEscape:
+				e.closeTab(e.activeTab)
+			case tcell.KeyTab:
+				if ev.Modifiers()&tcell.ModCtrl != 0 {
+					if ev.Modifiers()&tcell.ModShift != 0 {
+						e.prevTab()
+					} else {
+						e.nextTab()
+					}
+				}
+			}
+			return
+		}
+	}
+
 	// Editor keybindings
 	switch ev.Key() {
 	case tcell.KeyCtrlB:
@@ -247,7 +300,14 @@ func (e *Editor) handleKey(ev *tcell.EventKey) {
 		e.dialog = nil
 		return
 	case tcell.KeyTab:
-		if ev.Modifiers()&tcell.ModShift != 0 {
+		if ev.Modifiers()&tcell.ModCtrl != 0 {
+			// Ctrl+Tab / Ctrl+Shift+Tab for tab switching
+			if ev.Modifiers()&tcell.ModShift != 0 {
+				e.prevTab()
+			} else {
+				e.nextTab()
+			}
+		} else if ev.Modifiers()&tcell.ModShift != 0 {
 			buf := e.activeBuffer()
 			if buf != nil {
 				buf.DedentSelection()
@@ -270,16 +330,6 @@ func (e *Editor) handleKey(ev *tcell.EventKey) {
 		return
 	}
 
-	// Ctrl+Tab / Ctrl+Shift+Tab for tab switching
-	if ev.Key() == tcell.KeyTab && ev.Modifiers()&tcell.ModCtrl != 0 {
-		if ev.Modifiers()&tcell.ModShift != 0 {
-			e.prevTab()
-		} else {
-			e.nextTab()
-		}
-		return
-	}
-
 	// Ctrl+/ for comment toggle
 	if ev.Key() == tcell.KeyRune && ev.Rune() == '/' && ev.Modifiers()&tcell.ModCtrl != 0 {
 		buf := e.activeBuffer()
@@ -295,18 +345,6 @@ func (e *Editor) handleKey(ev *tcell.EventKey) {
 		buf := e.activeBuffer()
 		if buf != nil {
 			buf.ToggleFold(buf.Cursor.Line)
-		}
-		return
-	}
-
-	// Ctrl+Space for command palette (toggle)
-	if ev.Key() == tcell.KeyRune && ev.Rune() == ' ' && ev.Modifiers()&tcell.ModCtrl != 0 {
-		if e.commandPalette != nil {
-			// Already open - close it
-			e.commandPalette = nil
-		} else {
-			// Open it
-			e.openCommandPalette()
 		}
 		return
 	}
@@ -338,7 +376,7 @@ func (e *Editor) handleKey(ev *tcell.EventKey) {
 	}
 
 	// Arrow keys and movement
-	buf := e.activeBuffer()
+	buf = e.activeBuffer()
 	if buf == nil {
 		return
 	}
@@ -411,7 +449,7 @@ func (e *Editor) handleKey(ev *tcell.EventKey) {
 			buf.Cursor.Line--
 			// Validate before accessing
 			if buf.Cursor.Line >= 0 && buf.Cursor.Line < len(buf.Lines) {
-				buf.Cursor.Col = len(buf.Lines[buf.Cursor.Line])
+				buf.Cursor.Col = buffer.RuneLen(buf.Lines[buf.Cursor.Line])
 			}
 		}
 		if buf.HasExtraCursors() {
@@ -430,7 +468,7 @@ func (e *Editor) handleKey(ev *tcell.EventKey) {
 		}
 		if wordMod {
 			buf.MoveWordRight()
-		} else if buf.Cursor.Line >= 0 && buf.Cursor.Line < len(buf.Lines) && buf.Cursor.Col < len(buf.Lines[buf.Cursor.Line]) {
+		} else if buf.Cursor.Line >= 0 && buf.Cursor.Line < len(buf.Lines) && buf.Cursor.Col < buffer.RuneLen(buf.Lines[buf.Cursor.Line]) {
 			buf.Cursor.Col++
 		} else if buf.Cursor.Line < len(buf.Lines)-1 {
 			buf.Cursor.Line++
@@ -469,9 +507,9 @@ func (e *Editor) handleKey(ev *tcell.EventKey) {
 		}
 		if ctrl {
 			buf.Cursor.Line = len(buf.Lines) - 1
-			buf.Cursor.Col = len(buf.Lines[buf.Cursor.Line])
-		} else {
-			buf.Cursor.Col = len(buf.Lines[buf.Cursor.Line])
+		}
+		if buf.Cursor.Line >= 0 && buf.Cursor.Line < len(buf.Lines) {
+			buf.Cursor.Col = buffer.RuneLen(buf.Lines[buf.Cursor.Line])
 		}
 		if shift {
 			e.extendSelection(buf)
@@ -703,8 +741,8 @@ func (e *Editor) handleEditorMouse(ev *tcell.EventMouse) {
 			displayCol = 0
 		}
 		col := displayColToBufferCol(buf.Lines[line], displayCol, buf.TabSize)
-		if col > len(buf.Lines[line]) {
-			col = len(buf.Lines[line])
+		if col > buffer.RuneLen(buf.Lines[line]) {
+			col = buffer.RuneLen(buf.Lines[line])
 		}
 
 		if modifiers&tcell.ModShift != 0 {
@@ -768,16 +806,16 @@ func (e *Editor) handleEditorMouse(ev *tcell.EventMouse) {
 
 			// Add cursor at clicked line, using anchor column
 			col := e.middleMouseAnchor.Col
-			if col > len(buf.Lines[line]) {
-				col = len(buf.Lines[line])
+			if col > buffer.RuneLen(buf.Lines[line]) {
+				col = buffer.RuneLen(buf.Lines[line])
 			}
 			buf.AddCursorAt(line, col)
 		} else if line != e.middleMouseLine {
 			// Dragging middle/right mouse - add cursor at each new line
 			// Use the anchor column to keep cursors in a straight vertical line
 			col := e.middleMouseAnchor.Col
-			if col > len(buf.Lines[line]) {
-				col = len(buf.Lines[line])
+			if col > buffer.RuneLen(buf.Lines[line]) {
+				col = buffer.RuneLen(buf.Lines[line])
 			}
 			buf.AddCursorAt(line, col)
 			e.middleMouseLine = line
@@ -863,7 +901,18 @@ func (e *Editor) extendSelection(buf *buffer.Buffer) {
 }
 
 func (e *Editor) clampCol(buf *buffer.Buffer) {
-	lineLen := len(buf.Lines[buf.Cursor.Line])
+	if len(buf.Lines) == 0 {
+		buf.Lines = []string{""}
+		buf.Cursor.Line = 0
+		buf.Cursor.Col = 0
+		return
+	}
+	if buf.Cursor.Line < 0 {
+		buf.Cursor.Line = 0
+	} else if buf.Cursor.Line >= len(buf.Lines) {
+		buf.Cursor.Line = len(buf.Lines) - 1
+	}
+	lineLen := buffer.RuneLen(buf.Lines[buf.Cursor.Line])
 	if buf.Cursor.Col > lineLen {
 		buf.Cursor.Col = lineLen
 	}
@@ -931,7 +980,7 @@ func (e *Editor) cutSelection() {
 			if buf.Cursor.Line < 0 {
 				buf.Cursor.Line = 0
 			}
-			lineLen := len(buf.Lines[buf.Cursor.Line])
+			lineLen := buffer.RuneLen(buf.Lines[buf.Cursor.Line])
 			if buf.Cursor.Col > lineLen {
 				buf.Cursor.Col = lineLen
 			}
@@ -967,7 +1016,7 @@ func (e *Editor) markDirty() {
 		e.tabBar.SetModified(e.activeTab, buf.Dirty)
 		e.highlight.InvalidateCache(buf.Path)
 		// Pin preview tab on edit
-		if e.previewTab == e.activeTab {
+		if e.previewTab == e.activeTab && e.activeTab >= 0 && e.activeTab < len(e.tabBar.Tabs) {
 			e.tabBar.Tabs[e.activeTab].Preview = false
 			e.previewTab = -1
 		}
@@ -1097,8 +1146,10 @@ func (e *Editor) openSaveAsDialog() {
 			if err != nil {
 				if os.IsPermission(err) {
 					e.promptSudoSave(buf, absPath, func() {
-						e.tabBar.Tabs[e.activeTab].Title = filepath.Base(absPath)
-						e.tabBar.Tabs[e.activeTab].Path = absPath
+						if e.activeTab >= 0 && e.activeTab < len(e.tabBar.Tabs) {
+							e.tabBar.Tabs[e.activeTab].Title = filepath.Base(absPath)
+							e.tabBar.Tabs[e.activeTab].Path = absPath
+						}
 						e.updateStatus()
 					})
 					return
@@ -1106,8 +1157,10 @@ func (e *Editor) openSaveAsDialog() {
 				e.setTemporaryError("Error saving: " + err.Error())
 			} else {
 				e.onSaveSuccess(buf, "Saved "+filepath.Base(absPath))
-				e.tabBar.Tabs[e.activeTab].Title = filepath.Base(absPath)
-				e.tabBar.Tabs[e.activeTab].Path = absPath
+				if e.activeTab >= 0 && e.activeTab < len(e.tabBar.Tabs) {
+					e.tabBar.Tabs[e.activeTab].Title = filepath.Base(absPath)
+					e.tabBar.Tabs[e.activeTab].Path = absPath
+				}
 				e.updateStatus()
 			}
 		}
@@ -1182,6 +1235,16 @@ func (e *Editor) toggleSettingsDialog() {
 	e.openSettingsDialog()
 }
 
+func (e *Editor) closeFragileModals() {
+	if e.commandPalette != nil {
+		e.commandPalette = nil
+	}
+	if e.dialog != nil && e.dialog.Type == ui.DialogSettings {
+		e.cfg.Save()
+		e.dialog = nil
+	}
+}
+
 func (e *Editor) openSettingsDialog() {
 	options := []string{
 		"Theme",
@@ -1193,6 +1256,8 @@ func (e *Editor) openSettingsDialog() {
 		"Quote Wrap Selection",
 		"Trim Trailing Whitespace",
 		"Insert Final Newline",
+		"Image Temp Tabs",
+		"Image Protocol",
 	}
 	values := []string{
 		e.cfg.Theme,
@@ -1204,11 +1269,22 @@ func (e *Editor) openSettingsDialog() {
 		boolSettingValue(e.cfg.QuoteWrapSelection),
 		boolSettingValue(e.cfg.TrimTrailingSpace),
 		boolSettingValue(e.cfg.InsertFinalNewline),
+		boolSettingValue(e.cfg.ImageTempTabs),
+		e.cfg.ImageProtocol,
+	}
+
+	sections := []ui.SettingsSection{
+		{Name: "Appearance", Options: []string{"Theme"}, Indices: []int{0}},
+		{Name: "Layout", Options: []string{"Space Size", "Tree Width", "Terminal Ratio"}, Indices: []int{1, 2, 3}},
+		{Name: "Editor", Options: []string{"Word Wrap", "Auto Close", "Quote Wrap Selection"}, Indices: []int{4, 5, 6}},
+		{Name: "Files", Options: []string{"Trim Trailing Whitespace", "Insert Final Newline"}, Indices: []int{7, 8}},
+		{Name: "Images", Options: []string{"Image Temp Tabs", "Image Protocol"}, Indices: []int{9, 10}},
 	}
 
 	d := ui.NewSettingsDialog(options, values)
+	d.SettingsSections = sections
 	d.OnCancel = func() {
-		e.cfg.Save() // Save settings when closing with ESC
+		e.cfg.Save()
 		e.dialog = nil
 	}
 	d.OnSettingChange = func(index int, currentValue string) {
@@ -1284,6 +1360,16 @@ func (e *Editor) applySettingByDirection(index int, direction int, d *ui.Dialog)
 	case 8: // Insert Final Newline
 		e.cfg.InsertFinalNewline = !e.cfg.InsertFinalNewline
 		d.SettingsValues[8] = boolSettingValue(e.cfg.InsertFinalNewline)
+	case 9: // Image Temp Tabs
+		e.cfg.ImageTempTabs = !e.cfg.ImageTempTabs
+		d.SettingsValues[9] = boolSettingValue(e.cfg.ImageTempTabs)
+	case 10: // Image Protocol
+		protocols := []string{"auto", "sixel", "halfblock", "braille", "kitty", "iterm2"}
+		e.cfg.ImageProtocol = cycleString(protocols, e.cfg.ImageProtocol, direction)
+		d.SettingsValues[10] = e.cfg.ImageProtocol
+		for _, iv := range e.imageViews {
+			iv.SetProtocol(e.cfg.ImageProtocol)
+		}
 	}
 	e.cfg.Save()
 }
