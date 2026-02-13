@@ -36,6 +36,7 @@ If you like editing in the terminal but still want modern tooling, ALN sits in a
 - **Faster and richer than basic terminal editors**
 - **Less ceremony than modal workflows**
 - **More focused than heavyweight GUI IDEs**
+- **Inline image rendering in terminal tabs (Kitty/iTerm2/SIXEL + fallbacks)**
 
 It is built for people living in shells, SSH sessions, tmux, and remote boxes.
 
