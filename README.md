@@ -88,6 +88,11 @@ It is built for people living in shells, SSH sessions, tmux, and remote boxes.
 - Syntax highlighting (Chroma)
 - `.editorconfig` support
 
+### Images
+- Inline image rendering in tabs for common formats
+- Graphics backends: Kitty, iTerm2, SIXEL
+- Fallback renderers when needed: Braille and Halfblock
+
 ### UI & terminal
 - File tree (open, create, rename, delete, refresh)
 - PTY terminal with ANSI support
@@ -130,6 +135,11 @@ It is built for people living in shells, SSH sessions, tmux, and remote boxes.
 - Alternate buffer support and cursor mode handling
 - Bracketed paste support
 - Clipboard sync with layered fallbacks (native API, wl-clipboard/xclip/xsel/pbcopy, OSC 52)
+
+#### Image depth
+- Protocol-aware rendering: Kitty, iTerm2, SIXEL
+- Text-mode fallbacks: Braille and Halfblock
+- Backend can be selected manually in Settings (`Image Protocol`) or auto-detected
 
 #### Persistence depth
 - Backups stored at `~/.local/share/aln/backups`
